@@ -1,7 +1,8 @@
+#include "settings/SettingsComponent.h"
 #include "InputAppleRemote.h"
 #include "QsLog.h"
 
-#include "HIDRemote/HIDRemote.h"
+#include "HIDRemote.h"
 #include "AppleRemoteDelegate.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -32,54 +33,34 @@ void InputAppleRemote::removeRemote(const QString &name)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-static QString codeToString(HIDRemoteButtonCode code)
-{
-  switch (code)
-  {
-    case kHIDRemoteButtonCodeCenter:
-      return INPUT_KEY_SELECT;
-    case kHIDRemoteButtonCodeCenterHold:
-      return INPUT_KEY_SELECT_LONG;
-    case kHIDRemoteButtonCodeDown:
-      return INPUT_KEY_DOWN;
-    case kHIDRemoteButtonCodeDownHold:
-      return INPUT_KEY_DOWN_LONG;
-    case kHIDRemoteButtonCodeLeft:
-      return INPUT_KEY_LEFT;
-    case kHIDRemoteButtonCodeLeftHold:
-      return INPUT_KEY_LEFT_LONG;
-    case kHIDRemoteButtonCodeRight:
-      return INPUT_KEY_RIGHT;
-    case kHIDRemoteButtonCodeRightHold:
-      return INPUT_KEY_RIGHT_LONG;
-    case kHIDRemoteButtonCodeMenu:
-      return INPUT_KEY_MENU;
-    case kHIDRemoteButtonCodeMenuHold:
-      return INPUT_KEY_MENU_LONG;
-    case kHIDRemoteButtonCodePlay:
-      return INPUT_KEY_PLAY;
-    case kHIDRemoteButtonCodePlayHold:
-      return INPUT_KEY_PLAY_LONG;
-    case kHIDRemoteButtonCodeUp:
-      return INPUT_KEY_UP;
-    case kHIDRemoteButtonCodeUpHold:
-      return INPUT_KEY_UP_LONG;
-    default:
-      QLOG_WARN() << "could not handle key code:" << code;
-  }
-  return "";
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
 void InputAppleRemote::remoteButtonEvent(quint8 code, bool pressed, const QString &name)
 {
-  if (pressed)
-  {
-    QString codeStr = codeToString((HIDRemoteButtonCode)code);
-    if (!codeStr.isEmpty())
-    {
-      QLOG_DEBUG() << name << "pressed button:" << codeStr;
-      emit receivedInput("AppleRemote", codeStr);
-    }
-  }
+  // This following code emulates the harmony remotes input to PHT. The Apple API is actually
+  // limited to just the number of keys that are on Apple specific remotes so we had to work
+  // around that with the following hack: deviceID was used as a prefix for what the keys meant
+  // so for example if we send deviceID 150 and keycode UP it means up, but instead deviceID 151
+  // and UP it can be mapped to a different key.
+  //
+  // The harmony profile for this is using deviceID's 150-160 to prefix the keycode, so we will
+  // treat them differently here than the other keycodes. We append the deviceID to the keycode
+  // when the deviceID falls inside the 150-160 range, otherwise we assume the keycode is coming
+  // from a "normal" remote and only forward the keycode.
+  //
+  // Since it's unknown if this will cause problems with any remotes I have added a setting:
+  // appleremote.emulatepht to turn this off if needed, but for now we'll keep it defaulted to on
+  //
+  QString eventName;
+  if (SettingsComponent::Get().value(SETTINGS_SECTION_APPLEREMOTE, "emulatepht").toBool() &&
+      (m_remoteID >= 150 && m_remoteID <= 160))
+    eventName = QString("%1-%2").arg(m_remoteID).arg(code);
+  else
+    eventName = QString::number(code);
+
+  emit receivedInput("AppleRemote", eventName, pressed ? KeyDown : KeyUp);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void InputAppleRemote::changeRemoteID(quint32 newID)
+{
+  m_remoteID = newID;
 }

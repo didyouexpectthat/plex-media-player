@@ -41,7 +41,7 @@ void GDMManager::readData()
   while (m_socket.hasPendingDatagrams())
   {
     QByteArray datagram;
-    datagram.resize(m_socket.pendingDatagramSize());
+    datagram.resize((int)m_socket.pendingDatagramSize());
 
     QHostAddress sender;
     quint16 senderPort;
@@ -69,7 +69,7 @@ QByteArray GDMManager::getPacket()
 
   QVariantMap headers = RemoteComponent::GDMInformation();
 
-  foreach (const QString& key, headers.keys())
+  for(const QString& key : headers.keys())
     packetData.append(key + ": " + headers[key].toString() + "\r\n");
 
   // terminate header

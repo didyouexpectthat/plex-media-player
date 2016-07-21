@@ -9,7 +9,10 @@
 #include <QTimer>
 #include <QTextStream>
 
+#include <functional>
+
 #include "ComponentManager.h"
+#include "CodecsComponent.h"
 
 #include <mpv/client.h>
 #include <mpv/qthelper.hpp>
@@ -23,13 +26,13 @@ class PlayerComponent : public ComponentBase
   DEFINE_SINGLETON(PlayerComponent);
 
 public:
-  virtual const char* componentName() { return "player"; }
-  virtual bool componentExport() { return true; }
-  virtual bool componentInitialize();
-  virtual void componentPostInitialize();
+  const char* componentName() override { return "player"; }
+  bool componentExport() override { return true; }
+  bool componentInitialize() override;
+  void componentPostInitialize() override;
   
-  explicit PlayerComponent(QObject* parent = 0);
-  virtual ~PlayerComponent();
+  explicit PlayerComponent(QObject* parent = nullptr);
+  ~PlayerComponent() override;
 
   // Deprecated. Corresponds to stop() + queueMedia().
   Q_INVOKABLE bool load(const QString& url, const QVariantMap& options, const QVariantMap& metadata, const QString& audioStream = QString(), const QString& subtitleStream = QString());
@@ -47,7 +50,7 @@ public:
   // If you want to wipe everything, use stop().
   Q_INVOKABLE void clearQueue();
 
-  Q_INVOKABLE virtual void seekTo(qint64 milliseconds);
+  Q_INVOKABLE virtual void seekTo(qint64 ms);
 
   // Stop playback and clear all queued items.
   Q_INVOKABLE virtual void stop();
@@ -95,6 +98,16 @@ public:
   // including unknown codec names.
   Q_INVOKABLE virtual bool checkCodecSupport(const QString& codec);
 
+  // Return list of currently installed codecs. Includes builtin codecs.
+  // Downloadable, but not yet installed codecs are excluded.
+  // May include codecs that do not work, like vc1_mmal on RPIs with no license.
+  // (checkCodecSupport() handles this specific case to a degree.)
+  Q_INVOKABLE virtual QList<CodecDriver> installedCodecDrivers();
+
+  // Return list of codecs supported for decoding. This specifically returns
+  // the format and not decoder implementation (e.g. "h264" not "h264_mmal").
+  Q_INVOKABLE virtual QStringList installedDecoderCodecs();
+
   Q_INVOKABLE void userCommand(QString command);
 
   const mpv::qt::Handle getMpvHandle() const { return m_mpv; }
@@ -105,6 +118,14 @@ public:
 
   static QStringList AudioCodecsAll() { return { "ac3", "dts", "eac3", "dts-hd", "truehd" }; };
   static QStringList AudioCodecsSPDIF() { return { "ac3", "dts" }; };
+
+  enum class State {
+    stopped,
+    error,
+    paused,
+    playing,
+    buffering,
+  };
   
 public Q_SLOTS:
   void setAudioConfiguration();
@@ -117,35 +138,22 @@ private Q_SLOTS:
   void onRestoreDisplay();
   void onRefreshRateChange();
   void onReloadAudio();
+  void onCodecsLoadingDone(CodecsFetcher* sender);
 
 Q_SIGNALS:
-  void playing(const QString& url);
-  void buffering(float);
-  // playback has stopped due to a stop() or loadMedia() request
-  void stopped(const QString& url);
-  // playback has stopped because the current media was fully played
-  void finished(const QString& url);
-  // playback has stopped due to any reason - this always happens if the
-  // playing() signal was emitted
-  void playbackEnded(const QString& url);
-  // emitted if playback has ended, and no more items are queued for playback
-  void playbackAllDone();
-  // emitted after playing(), and as soon as the the media is fully loaded, and
-  // playback starts normally
-  void playbackStarting();
-  void paused(bool paused);
-  // true if the video (or music) is actually
+  // The following signals correspond to the State enum above.
+  void playing();                 // playback is progressing (audio playing, pictures are moving)
+  void buffering(float percent);  // temporary state during "playing", or during media loading
+  void stopped();                 // playback finished successfully, or was stopped with stop()
+  void paused();                  // paused (covers all sub-states)
+  void error(const QString& msg); // playback stopped due to external error
+
+  // true if the video (or music) is actually playing
   // false if nothing is loaded, playback is paused, during seeking, or media is being loaded
   void playbackActive(bool active);
   void windowVisible(bool visible);
   // emitted as soon as the duration of the current file is known
   void updateDuration(qint64 milliseconds);
-
-  // an error happened during playback - this implies abort of playback
-  // the id is the (negative) error number, and the message parameter is a short
-  // English description of the error (always the same for the same id, no
-  // further information)
-  void error(int id, const QString& message);
 
   // current position in ms should be triggered 2 times a second
   // when position updates
@@ -165,6 +173,7 @@ private:
   void loadWithOptions(const QVariantMap& options);
   void setRpiWindow(QQuickWindow* window);
   void setQtQuickWindow(QQuickWindow* window);
+  void updatePlaybackState();
   void handleMpvEvent(mpv_event *event);
   // Potentially switch the display refresh rate, and return true if the refresh rate
   // was actually changed.
@@ -172,12 +181,24 @@ private:
   void checkCurrentAudioDevice(const QSet<QString>& old_devs, const QSet<QString>& new_devs);
   void appendAudioFormat(QTextStream& info, const QString& property) const;
   void initializeCodecSupport();
+  PlaybackInfo getPlaybackInfo();
+  // Make the player prefer certain codecs over others.
+  void setPreferredCodecs(const QList<CodecDriver>& codecs);
+  // Determine the required codecs and possibly download them.
+  // Call resume() when done.
+  void startCodecsLoading(std::function<void()> resume);
+  void updateVideoAspectSettings();
 
   mpv::qt::Handle m_mpv;
 
+  State m_state;
+  bool m_paused;
+  bool m_playbackActive;
+  bool m_inPlayback;
+  int m_bufferingPercentage;
+  int m_lastBufferingPercentage;
   double m_lastPositionUpdate;
   qint64 m_playbackAudioDelay;
-  QString m_CurrentUrl;
   bool m_playbackStartSent;
   QQuickWindow* m_window;
   float m_mediaFrameRate;
@@ -186,6 +207,9 @@ private:
   QSet<QString> m_audioDevices;
   bool m_streamSwitchImminent;
   QMap<QString, bool> m_codecSupport;
+  bool m_doAc3Transcoding;
+  QStringList m_passthroughCodecs;
+  QVariantMap m_serverMediaInfo;
 };
 
 #endif // PLAYERCOMPONENT_H

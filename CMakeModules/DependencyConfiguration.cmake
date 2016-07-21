@@ -1,32 +1,32 @@
 find_package(PkgConfig)
-option(DISABLE_BUNDLED_DEPS "Disable the bundled deps on certain platforms" OFF)
 
 include(FetchDependencies)
 
-if(APPLE AND NOT DISABLE_BUNDLED_DEPS)  
-  download_deps(
-    "plexmediaplayer-dependencies"
-    ARTIFACTNAME konvergo-depends
-    DIRECTORY dir
-    DYLIB_SCRIPT_PATH ${PROJECT_SOURCE_DIR}/scripts/fix-install-names.py
-  )
-  message("dependencies are: ${dir}")
-  set(DEFAULT_ROOT ${dir})
-endif(APPLE AND NOT DISABLE_BUNDLED_DEPS)
+if(DEPENDENCY_TOKEN)
+  set(DEPENDCY_FOLDER "")
+  if(OPENELEC)
+    set(DEPENDCY_FOLDER plexmediaplayer-openelec-codecs)
+    set(DEPS_BUILD_NUMBER 45)
+  elseif(APPLE OR WIN32)
+    set(DEPENDCY_FOLDER plexmediaplayer-dependencies-codecs)
+    set(DEPS_BUILD_NUMBER 152)
+  endif()
+  if(NOT (DEPENDCY_FOLDER STREQUAL ""))
+    download_deps(
+      "${DEPENDCY_FOLDER}"
+      ARTIFACTNAME konvergo-codecs-depends
+      BUILD_NUMBER ${DEPS_BUILD_NUMBER}
+      DIRECTORY dir
+      DEPHASH_VAR DEPS_HASH
+      DYLIB_SCRIPT_PATH ${PROJECT_SOURCE_DIR}/scripts/fix-install-names.py
+      TOKEN ${DEPENDENCY_TOKEN}
+    )
+    message("dependencies are: ${dir}")
+    set(DEFAULT_ROOT ${dir})
+  endif()
+endif(DEPENDENCY_TOKEN)
 
 if(WIN32)
-  download_deps(
-    "plexmediaplayer-windows-dependencies"
-    DIRECTORY dir
-    ARTIFACTNAME konvergo-depends-windows
-    ARCHSTR mingw32-x86_64
-  )
-  if(NOT EXISTS ${dir}/lib/mpv.lib)
-    execute_process(
-      COMMAND ${PROJECT_SOURCE_DIR}/scripts/make_mpv_lib.bat
-      WORKING_DIRECTORY ${dir}
-    )
-  endif(NOT EXISTS ${dir}/lib/mpv.lib)
   message("dependencies are: ${dir}")
   set(DEFAULT_ROOT "${dir}")
 

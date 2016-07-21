@@ -15,19 +15,31 @@ bool CachedRegexMatcher::addMatcher(const QString& pattern, const QVariant& resu
     return false;
   }
 
+  // Remove older mapping if it exists.
+  if (!m_allowMultiplePatterns)
+  {
+    auto newEnd = std::remove_if(m_matcherList.begin(),m_matcherList.end(), [pattern](auto mp)
+    {
+      return mp.first.pattern() == pattern;
+    });
+    m_matcherList.erase(newEnd, m_matcherList.end());
+  }
+
   m_matcherList.push_back(qMakePair(matcher, result));
   return true;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-QVariant CachedRegexMatcher::match(const QString& input)
+QVariantList CachedRegexMatcher::match(const QString& input)
 {
   // first we check if this match has already happened before
   if (m_matcherCache.contains(input))
     return m_matcherCache.value(input);
 
+  QVariantList matches;
+
   // otherwise try to iterate our list and find a match
-  foreach(const MatcherValuePair& matcher, m_matcherList)
+  for(const MatcherValuePair& matcher : m_matcherList)
   {
     QRegExp re(matcher.first);
 
@@ -49,17 +61,19 @@ QVariant CachedRegexMatcher::match(const QString& input)
         returnValue = QVariant(value);
       }
 
-      // now cache the match and the final value
-      m_matcherCache.insert(input, returnValue);
-
-      return returnValue;
+      matches << returnValue;
     }
   }
 
   QLOG_DEBUG() << "No match for:" << input;
 
-  // no match at all
-  return QVariant();
+  if (!matches.isEmpty())
+  {
+    m_matcherCache.insert(input, matches);
+    return matches;
+  }
+
+  return QVariantList();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////

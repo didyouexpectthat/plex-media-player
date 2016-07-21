@@ -13,9 +13,10 @@ class SettingsSection : public QObject
   Q_OBJECT
 public:
   explicit SettingsSection(const QString& sectionID, quint8 platforms = PLATFORM_ANY,
-                           int _orderIndex = -1, QObject* parent = 0);
+                           int _orderIndex = -1, QObject* parent = nullptr);
 
   void updatePossibleValues(const QString& key, const QVariantList& possibleValues);
+  QVariantList possibleValues(const QString& key);
 
   void setValues(const QVariant& values);
   bool setValue(const QString& key, const QVariant& value);

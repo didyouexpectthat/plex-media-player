@@ -16,14 +16,14 @@ class SystemComponent : public ComponentBase
   DEFINE_SINGLETON(SystemComponent);
 
 public:
-  virtual bool componentExport() { return true; }
-  virtual const char* componentName() { return "system"; }
-  virtual bool componentInitialize();
-  virtual void componentPostInitialize();
+  bool componentExport() override { return true; }
+  const char* componentName() override { return "system"; }
+  bool componentInitialize() override;
+  void componentPostInitialize() override;
 
   Q_INVOKABLE QVariantMap systemInformation() const;
   Q_INVOKABLE void exit();
-  Q_INVOKABLE void restart();
+  Q_INVOKABLE static void restart();
 
   Q_INVOKABLE void info(QString text);
 
@@ -33,8 +33,6 @@ public:
 
   Q_INVOKABLE QString debugInformation();
 
-  Q_INVOKABLE QString logFilePath() { return Paths::logDir(Names::MainName() + ".log"); }
-
   Q_INVOKABLE QStringList networkAddresses() const;
   Q_INVOKABLE int networkPort() const;
 
@@ -43,6 +41,9 @@ public:
   Q_INVOKABLE void openExternalUrl(const QString& url);
 
   Q_INVOKABLE void runUserScript(QString script);
+
+  // called by the web-client when everything is properly inited
+  Q_INVOKABLE void hello(const QString& version);
 
   // possible os types type enum
   enum PlatformType
@@ -69,23 +70,28 @@ public:
   QString getPlatformTypeString() const;
   QString getPlatformArchString() const;
 
-  inline bool isOpenELEC() { return m_platformType == platformTypeOpenELEC; }
+  inline bool isOpenELEC() const { return m_platformType == platformTypeOpenELEC; }
+  bool isWebClientConnected() const { return !m_webClientVersion.isEmpty(); }
+
+  inline QString authenticationToken() { return m_authenticationToken; }
 
   Q_INVOKABLE void crashApp();
 
 signals:
   void hostMessage(const QString& message);
+  void settingsMessage(const QString& setting, const QString& value);
+  void scaleChanged(qreal scale);
 
 private:
-  SystemComponent(QObject* parent = 0);
+  explicit SystemComponent(QObject* parent = nullptr);
   static QMap<QString, QString> networkInterfaces();
 
   QTimer* m_mouseOutTimer;
   PlatformType m_platformType;
   PlatformArch m_platformArch;
-  QString m_overridePlatform;
   bool m_doLogMessages;
-
+  QString m_authenticationToken;
+  QString m_webClientVersion;
 };
 
 #endif

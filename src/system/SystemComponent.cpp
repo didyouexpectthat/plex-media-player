@@ -21,7 +21,7 @@
 #define KONVERGO_PRODUCTID_OPENELEC 4
 
 // Platform types map
-QMap<SystemComponent::PlatformType, QString> platformTypeNames = { \
+QMap<SystemComponent::PlatformType, QString> g_platformTypeNames = { \
   { SystemComponent::platformTypeOsx, "macosx" }, \
   { SystemComponent::platformTypeWindows, "windows" },
   { SystemComponent::platformTypeLinux, "linux" },
@@ -30,8 +30,9 @@ QMap<SystemComponent::PlatformType, QString> platformTypeNames = { \
 };
 
 // platform Archictecture map
-QMap<SystemComponent::PlatformArch, QString> platformArchNames = { \
-  { SystemComponent::platformArchX86_64, "x86_64" }, \
+QMap<SystemComponent::PlatformArch, QString> g_platformArchNames = {
+  { SystemComponent::platformArchX86_32, "i386" },
+  { SystemComponent::platformArchX86_64, "x86_64" },
   { SystemComponent::platformArchRpi2, "rpi2" },
   { SystemComponent::platformArchUnknown, "unknown" }
 };
@@ -71,13 +72,18 @@ SystemComponent::SystemComponent(QObject* parent) : ComponentBase(parent), m_pla
 bool SystemComponent::componentInitialize()
 {
   QDir().mkpath(Paths::dataDir("scripts"));
+  QDir().mkpath(Paths::dataDir("sounds"));
+
+  // Hide mouse pointer on any keyboard input
+  connect(&InputComponent::Get(), &InputComponent::receivedInput, [=]() { setCursorVisibility(false); });
+
   return true;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 void SystemComponent::crashApp()
 {
-  *(volatile int*)0=0;
+  *(volatile int*)nullptr=0;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -91,13 +97,13 @@ void SystemComponent::componentPostInitialize()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 QString SystemComponent::getPlatformTypeString() const
 {
-  return platformTypeNames[m_platformType];
+  return g_platformTypeNames[m_platformType];
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 QString SystemComponent::getPlatformArchString() const
 {
-  return platformArchNames[m_platformArch];
+  return g_platformArchNames[m_platformArch];
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -110,7 +116,7 @@ QVariantMap SystemComponent::systemInformation() const
   int productid = KONVERGO_PRODUCTID_DEFAULT;
 
 #ifdef Q_OS_WIN
-  arch = "x86_64";
+  arch = (sizeof(void *) == 8) ? "x86_64" : "i386";
 #else
   arch = QSysInfo::currentCpuArchitecture();
 #endif
@@ -220,7 +226,7 @@ QString SystemComponent::debugInformation()
   stream << endl;
 
   stream << "Network Addresses" << endl;
-  foreach (const QString& addr, networkAddresses())
+  for(const QString& addr : networkAddresses())
   {
     stream << "  " << addr << endl;
   }
@@ -240,7 +246,7 @@ int SystemComponent::networkPort() const
 QStringList SystemComponent::networkAddresses() const
 {
   QStringList list;
-  foreach(const QHostAddress& address, QNetworkInterface::allAddresses())
+  for(const QHostAddress& address : QNetworkInterface::allAddresses())
   {
     if (! address.isLoopback() && (address.protocol() == QAbstractSocket::IPv4Protocol ||
                                    address.protocol() == QAbstractSocket::IPv6Protocol))
@@ -258,12 +264,14 @@ QStringList SystemComponent::networkAddresses() const
 void SystemComponent::userInformation(const QVariantMap& userModel)
 {
   QStringList roleList;
-  foreach (const QVariant& role, userModel.value("roles").toList())
+  for(const QVariant& role : userModel.value("roles").toList())
   { 
     roleList << role.toMap().value("id").toString();
   }
 
   SettingsComponent::Get().setUserRoleList(roleList);
+
+  m_authenticationToken = userModel.value("authenticationToken").toString();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -305,4 +313,13 @@ void SystemComponent::runUserScript(QString script)
     QLOG_WARN() << "Could not find script:" << scriptPath;
   }
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void SystemComponent::hello(const QString& version)
+{
+  QLOG_DEBUG() << QString("Web-client (%1) fully inited.").arg(version);
+  m_webClientVersion = version;
+}
+
+
 

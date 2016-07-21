@@ -1,22 +1,23 @@
-project(PlexMediaPlayer CXX C)
 cmake_minimum_required(VERSION 3.1.0 FATAL_ERROR)
 
-cmake_policy(SET CMP0020 NEW)
-if (POLICY CMP0058)
-cmake_policy(SET CMP0058 NEW)
+# use a toolchain file if any for Embedded
+if (EXISTS "${CMAKE_SOURCE_DIR}/toolchain.cmake")
+  set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/toolchain.cmake")
 endif()
-cmake_policy(SET CMP0017 NEW)
+
+project(PlexMediaPlayer CXX C)
+
+# we want this to be able to run clang-tidy
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "" FORCE)
 
 option(OPENELEC "Make an OpenELEC build" OFF)
 
-if (OPENELEC)
+if(OPENELEC)
   add_definitions(-DKONVERGO_OPENELEC=1)
   Message(STATUS "Making an OpenELEC build")
 endif(OPENELEC)
 
-option(BUILD_TARGET "Destination target for the build" "")
-
-if (BUILD_TARGET STREQUAL "RPI")
+if(BUILD_TARGET STREQUAL "RPI")
   add_definitions(-DTARGET_RPI=1)
   set(RPI_LIBS bcm_host)
   Message(STATUS "Build for Raspberry PI target")
@@ -26,17 +27,31 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
 set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME Core)
 
-add_definitions(-DQS_LOG_LINE_NUMBERS)
+macro(set_policy _POLICY _VALUE)
+  if(POLICY ${_POLICY})
+    cmake_policy(SET ${_POLICY} ${_VALUE})
+  endif()
+endmacro()
 
+set_policy(CMP0020 NEW)
+set_policy(CMP0017 NEW)
+set_policy(CMP0058 NEW)
+set_policy(CMP0026 OLD)
+
+include(utils)
+include(CompilerFlags)
 include(DependencyConfiguration)
 include(QtConfiguration)
+include(WebClientResources)
 include(VersionConfiguration)
 include(NameConfiguration)
-include(utils)
 include(PlayerConfiguration)
 include(InputConfiguration)
 include(FindBreakpad)
 include(BreakpadSymbols)
+include(ClangTidy)
+
+add_definitions(-DQS_LOG_LINE_NUMBERS -DQS_LOG_SEPARATE_THREAD)
 
 if(APPLE)
   include(AppleConfiguration)
@@ -46,12 +61,9 @@ elseif(UNIX AND (NOT APPLE))
   include(LinuxConfiguration)
 endif(APPLE)
 
-if(CMAKE_COMPILER_IS_GNUCC)
-  include(GCCConfiguration)
-endif(CMAKE_COMPILER_IS_GNUCC)
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${WARNINGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${WARNINGS}")
+if (Qt5_POSITION_INDEPENDENT_CODE)
+  SET(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif(Qt5_POSITION_INDEPENDENT_CODE)
 
 add_subdirectory(external)
 add_subdirectory(src)

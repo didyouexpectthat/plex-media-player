@@ -13,9 +13,8 @@ add_executable(${HELPER_TARGET} WIN32
 )
 
 target_link_libraries(${HELPER_TARGET} ${Qt5Core_LIBRARIES} ${Qt5Network_LIBRARIES} qslog shared)
+std_target_properties(${HELPER_TARGET})
 set_target_properties(${HELPER_TARGET} PROPERTIES
-  CXX_STANDARD 11
-  CXX_STANDARD_REQUIRED TRUE
   OUTPUT_NAME ${HELPER_NAME}
 )
 
@@ -32,3 +31,5 @@ add_custom_command(
 if(NOT APPLE)
   install(TARGETS ${HELPER_TARGET} DESTINATION ${INSTALL_BIN_DIR})
 endif(NOT APPLE)
+
+clang_tidy(${HELPER_TARGET})

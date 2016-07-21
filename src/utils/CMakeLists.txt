@@ -4,9 +4,14 @@ add_sources(
   PlatformUtils.cpp PlatformUtils.h
   HelperLauncher.h HelperLauncher.cpp
   Utils.cpp Utils.h
+  Log.cpp Log.h
 )
 
 if(APPLE)
   add_sources(HelperLaunchd.cpp HelperLaunchd.cpp)
   add_subdirectory(osx)
 endif(APPLE)
+
+if(WIN32)
+  add_subdirectory(win)
+endif()

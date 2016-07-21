@@ -1,4 +1,3 @@
-
 #include "QsLog.h"
 #include "InputComponent.h"
 #include "settings/SettingsComponent.h"
@@ -25,8 +24,11 @@
 #include "InputCEC.h"
 #endif
 
+#define LONG_HOLD_MSEC 500
+#define INITAL_AUTOREPEAT_MSEC 650
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-InputComponent::InputComponent(QObject* parent) : ComponentBase(parent)
+InputComponent::InputComponent(QObject* parent) : ComponentBase(parent), m_autoRepeatCount(0)
 {
   m_mappings = new InputMapping(this);
 }
@@ -47,7 +49,23 @@ bool InputComponent::addInput(InputBase* base)
   // needs to be remaped in remapInput and then finally send it out to JS land.
   //
   connect(base, &InputBase::receivedInput, this, &InputComponent::remapInput);
-  
+
+  // for auto-repeating inputs
+  //
+  m_autoRepeatTimer = new QTimer(this);
+  connect(m_autoRepeatTimer, &QTimer::timeout, [=]()
+  {
+    if (!m_autoRepeatActions.isEmpty())
+    {
+      m_autoRepeatCount ++;
+      QLOG_DEBUG() << "Emit input action (autorepeat):" << m_autoRepeatActions;
+      emit hostInput(m_autoRepeatActions);
+    }
+
+    qint32 multiplier = qMin(5, qMax(1, m_autoRepeatCount / 5));
+    m_autoRepeatTimer->setInterval(100 / multiplier);
+  });
+
   return true;
 }
 
@@ -79,79 +97,165 @@ bool InputComponent::componentInitialize()
   return true;
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void InputComponent::remapInput(const QString &source, const QString &keycode, float amount)
+/////////////////////////////////////////////////////////////////////////////////////////
+void InputComponent::handleAction(const QString& action)
 {
-  // hide mouse if it's visible.
-  SystemComponent::Get().setCursorVisibility(false);
-
-  QLOG_DEBUG() << "Input received: source:" << source << "keycode:" << keycode;
-
-  QString action = m_mappings->mapToAction(source, keycode);
-  if (!action.isEmpty())
+  if (action.startsWith("host:"))
   {
-    if (action.startsWith("host:"))
+    QStringList argList = action.mid(5).split(" ");
+    QString hostCommand = argList.value(0);
+    QString hostArguments;
+
+    if (argList.size() > 1)
     {
-      QStringList argList = action.mid(5).split(" ");
-      QString hostCommand = argList.value(0);
-      QString hostArguments;
+      argList.pop_front();
+      hostArguments = argList.join(" ");
+    }
 
-      if (argList.size() > 1)
+    QLOG_DEBUG() << "Got host command:" << hostCommand << "arguments:" << hostArguments;
+    if (m_hostCommands.contains(hostCommand))
+    {
+      ReceiverSlot* recvSlot = m_hostCommands.value(hostCommand);
+      if (recvSlot)
       {
-        argList.pop_front();
-        hostArguments = argList.join(" ");
-      }
-
-      QLOG_DEBUG() << "Got host command:" << hostCommand << "arguments:" << hostArguments;
-      if (m_hostCommands.contains(hostCommand))
-      {
-        ReceiverSlot* recvSlot = m_hostCommands.value(hostCommand);
-        if (recvSlot)
+        if (recvSlot->m_function)
         {
-          QLOG_DEBUG() << "Invoking slot" << qPrintable(recvSlot->slot.data());
+          QLOG_DEBUG() << "Invoking anonymous function";
+          recvSlot->m_function();
+        }
+        else
+        {
+          QLOG_DEBUG() << "Invoking slot" << qPrintable(recvSlot->m_slot.data());
           QGenericArgument arg0 = QGenericArgument();
-          if (recvSlot->hasArguments)
+
+          if (recvSlot->m_hasArguments)
             arg0 = Q_ARG(const QString&, hostArguments);
-          QMetaObject::invokeMethod(recvSlot->receiver, recvSlot->slot.data(),
+
+          QMetaObject::invokeMethod(recvSlot->m_receiver, recvSlot->m_slot.data(),
                                     Qt::AutoConnection, arg0);
         }
-      }
-      else
-      {
-        QLOG_WARN() << "No such host command:" << hostCommand;
       }
     }
     else
     {
-      emit receivedAction(action);
+      QLOG_WARN() << "No such host command:" << hostCommand;
     }
   }
-  else
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void InputComponent::remapInput(const QString &source, const QString &keycode, InputBase::InputkeyState keyState)
+{
+  QLOG_DEBUG() << "Input received: source:" << source << "keycode:" << keycode << ":" << keyState;
+
+  emit receivedInput();
+
+  if (keyState == InputBase::KeyUp)
   {
-    QLOG_WARN() << "Could not map:" << source << keycode << "to any useful action";
+    m_autoRepeatTimer->stop();
+    m_autoRepeatActions.clear();
+    m_autoRepeatCount = 0;
+
+    if (!m_currentLongPressAction.isEmpty())
+    {
+      QString type;
+      if (m_longHoldTimer.elapsed() > LONG_HOLD_MSEC)
+        type = "long";
+      else
+        type = "short";
+
+      QString action = m_currentLongPressAction.value(type).toString();
+
+      m_currentLongPressAction.clear();
+
+      QLOG_DEBUG() << "Emit input action (" + type + "):" << action;
+      emit hostInput(QStringList{action});
+    }
+
+    return;
   }
+
+  QStringList queuedActions;
+  m_autoRepeatActions.clear();
+
+  auto actions = m_mappings->mapToAction(source, keycode);
+  for (auto action : actions)
+  {
+    if (action.type() == QVariant::String)
+    {
+      queuedActions.append(action.toString());
+      m_autoRepeatActions.append(action.toString());
+    }
+    else if (action.type() == QVariant::Map)
+    {
+      QVariantMap map = action.toMap();
+      if (map.contains("long"))
+      {
+        // Don't overwrite long actions if there was no key up event yet.
+        // (It could be a key autorepeated by Qt.)
+        if (m_currentLongPressAction.isEmpty())
+        {
+          m_longHoldTimer.start();
+          m_currentLongPressAction = map;
+        }
+      }
+      else if (map.contains("short"))
+      {
+        queuedActions.append(map.value("short").toString());
+      }
+    }
+    else if (action.type() == QVariant::List)
+    {
+      queuedActions.append(action.toStringList());
+    }
+  }
+
+  if (!m_autoRepeatActions.isEmpty() && keyState != InputBase::KeyPressed)
+    m_autoRepeatTimer->start(INITAL_AUTOREPEAT_MSEC);
+
+  if (!queuedActions.isEmpty())
+  {
+    if (SystemComponent::Get().isWebClientConnected())
+    {
+      QLOG_DEBUG() << "Emit input action:" << queuedActions;
+      emit hostInput(queuedActions);
+    }
+    else
+    {
+      QLOG_DEBUG() << "Web Client has not connected, handling input in host instead.";
+      executeActions(queuedActions);
+    }
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void InputComponent::executeActions(const QStringList& actions)
+{
+  for (auto action : actions)
+    handleAction(action);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 void InputComponent::registerHostCommand(const QString& command, QObject* receiver, const char* slot)
 {
-  ReceiverSlot* recvSlot = new ReceiverSlot;
-  recvSlot->receiver = receiver;
-  recvSlot->slot = QMetaObject::normalizedSignature(slot);
-  recvSlot->hasArguments = false;
+  auto  recvSlot = new ReceiverSlot;
+  recvSlot->m_receiver = receiver;
+  recvSlot->m_slot = QMetaObject::normalizedSignature(slot);
+  recvSlot->m_hasArguments = false;
 
-  QLOG_DEBUG() << "Adding host command:" << qPrintable(command) << "mapped to" << qPrintable(QString(receiver->metaObject()->className()) + "::" + recvSlot->slot);
+  QLOG_DEBUG() << "Adding host command:" << qPrintable(command) << "mapped to"
+               << qPrintable(QString(receiver->metaObject()->className()) + "::" + recvSlot->m_slot);
 
   m_hostCommands.insert(command, recvSlot);
 
-  auto slotWithArgs = QString("%1(QString)").arg(QString::fromLatin1(recvSlot->slot)).toLatin1();
-  auto slotWithoutArgs = QString("%1()").arg(QString::fromLatin1(recvSlot->slot)).toLatin1();
-  if (recvSlot->receiver->metaObject()->indexOfMethod(slotWithArgs.data()) != -1)
+  auto slotWithArgs = QString("%1(QString)").arg(QString::fromLatin1(recvSlot->m_slot)).toLatin1();
+  auto slotWithoutArgs = QString("%1()").arg(QString::fromLatin1(recvSlot->m_slot)).toLatin1();
+  if (recvSlot->m_receiver->metaObject()->indexOfMethod(slotWithArgs.data()) != -1)
   {
     QLOG_DEBUG() << "Host command maps to method with an argument.";
-    recvSlot->hasArguments = true;
+    recvSlot->m_hasArguments = true;
   }
-  else if (recvSlot->receiver->metaObject()->indexOfMethod(slotWithoutArgs.data()) != -1)
+  else if (recvSlot->m_receiver->metaObject()->indexOfMethod(slotWithoutArgs.data()) != -1)
   {
     QLOG_DEBUG() << "Host command maps to method without arguments.";
   }
@@ -159,4 +263,13 @@ void InputComponent::registerHostCommand(const QString& command, QObject* receiv
   {
     QLOG_ERROR() << "Slot for host command missing, or has incorrect signature!";
   }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void InputComponent::registerHostCommand(const QString& command, std::function<void(void)> function)
+{
+  auto recvSlot = new ReceiverSlot;
+  recvSlot->m_function = function;
+  QLOG_DEBUG() << "Adding host command:" << qPrintable(command) << "mapped to anonymous function";
+  m_hostCommands.insert(command, recvSlot);
 }

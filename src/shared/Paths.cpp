@@ -11,6 +11,7 @@
 #include <QsLog.h>
 #include <QtGui/qguiapplication.h>
 #include "Names.h"
+#include "Version.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////
 static QDir writableLocation(QStandardPaths::StandardLocation loc)
@@ -28,16 +29,31 @@ static QDir writableLocation(QStandardPaths::StandardLocation loc)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
+// Try a couple of different strategies to find the file we are looking for.
+// 1) By looking next to the application binary
+// 2) By looking in binary/../Resources
+// 3) By looking in PREFIX/share/plexmediaplayer
+// 4) By looking in PREFIX/plexmediaplayer
+//
 QString Paths::resourceDir(const QString& file)
 {
-  auto resourceDir = QDir(QGuiApplication::applicationDirPath());
+  auto appResourceDir = QGuiApplication::applicationDirPath() + "/";
+  auto prefixDir = QString(PREFIX);
 
-#ifdef Q_OS_MAC
-  resourceDir.cdUp();
-  resourceDir.cd("Resources");
-#endif
+  QStringList possibleResourceDirs = {
+    appResourceDir,
+    appResourceDir + "../Resources/",
+    prefixDir + "/share/plexmediaplayer/",
+    prefixDir + "/plexmediaplayer/"
+  };
 
-  return resourceDir.filePath(file);
+  for (const auto& fileStr : possibleResourceDirs)
+  {
+    if (QFile::exists(fileStr + file))
+      return fileStr + file;
+  }
+
+  return appResourceDir + file;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -89,4 +105,31 @@ QString Paths::socketName(const QString& serverName)
 #else
   return QString("pmp_%1_%2.sock").arg(serverName).arg(userName);
 #endif
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+QString Paths::soundsPath(const QString& sound)
+{
+  // check local filesystem first
+  auto localSound = dataDir("sounds/" + sound);
+
+  QFileInfo f(localSound);
+  if (f.exists())
+    return f.absoluteFilePath();
+
+  f = QFileInfo(":/sounds/" + sound);
+  if (!f.exists())
+  {
+    QLOG_WARN() << "Can't find sound:" << sound;
+    return QString();
+  }
+
+  return f.absoluteFilePath();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+QString Paths::webClientPath()
+{
+  QString webName = QString("web-client-%1").arg(Version::GetWebVersion());
+  return resourceDir(webName + "/index.html");
 }

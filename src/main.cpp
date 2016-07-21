@@ -1,31 +1,35 @@
 #include <locale.h>
 
 #include <QGuiApplication>
+#include <QApplication>
 #include <QFileInfo>
 #include <QIcon>
 #include <QtQml>
 #include <QtWebEngine/qtwebengineglobal.h>
-#include <shared/Names.h>
+#include <QErrorMessage>
 
+#include "shared/Names.h"
 #include "system/SystemComponent.h"
 #include "system/UpdateManager.h"
 #include "QsLog.h"
 #include "Paths.h"
+#include "player/CodecsComponent.h"
 #include "player/PlayerComponent.h"
+#include "player/OpenGLDetect.h"
 #include "breakpad/CrashDumps.h"
 #include "Version.h"
 #include "settings/SettingsComponent.h"
 #include "settings/SettingsSection.h"
 #include "ui/KonvergoWindow.h"
-#include "ui/KonvergoEngine.h"
+#include "Globals.h"
+#include "ui/ErrorMessage.h"
 #include "UniqueApplication.h"
 #include "utils/HelperLauncher.h"
+#include "utils/Log.h"
 
 #if defined(Q_OS_MAC) || defined(Q_OS_LINUX)
 #include "SignalManager.h"
 #endif
-
-using namespace QsLogging;
 
 /////////////////////////////////////////////////////////////////////////////////////////
 static void preinitQt()
@@ -50,173 +54,82 @@ static void preinitQt()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-static void qtMessageOutput(QtMsgType type, const QMessageLogContext& context, const QString& msg)
+char** appendCommandLineArguments(int argc, char **argv, const QStringList& args)
 {
-    QByteArray localMsg = msg.toLocal8Bit();
-    QString prefix;
-    if (context.line)
-      prefix = QString("%1:%2:%3: ").arg(context.file).arg(context.line).arg(context.function);
-    QString text = prefix + msg;
-    switch (type)
-    {
-      case QtDebugMsg:
-        QLOG_DEBUG() << text;
-        break;
-      case QtInfoMsg:
-        QLOG_INFO() << text;
-        break;
-      case QtWarningMsg:
-        QLOG_WARN() << text;
-        break;
-      case QtCriticalMsg:
-        QLOG_ERROR() << text;
-        break;
-      case QtFatalMsg:
-        QLOG_FATAL() << text;
-        break;
-    }
+  size_t newSize = (argc + args.length() + 1) * sizeof(char*);
+  char** newArgv = (char**)calloc(1, newSize);
+  memcpy(newArgv, argv, (size_t)(argc * sizeof(char*)));
+
+  int pos = argc;
+  for(const QString& str : args)
+    newArgv[pos++] = qstrdup(str.toUtf8().data());
+
+  return newArgv;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-static void elidePattern(QString& msg, const QString& substring, int chars)
+void ShowLicenseInfo()
 {
-  int start = 0;
-  while (true)
-  {
-    start = msg.indexOf(substring, start);
-    if (start < 0 || start + substring.length() + chars > msg.length())
-      break;
-    start += substring.length();
-    for (int n = 0; n < chars; n++)
-      msg[start + n] = QChar('x');
-  }
+  QFile licenses(":/misc/licenses.txt");
+  licenses.open(QIODevice::ReadOnly | QIODevice::Text);
+  QByteArray contents = licenses.readAll();
+  printf("%.*s\n", contents.size(), contents.data());
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-static void processLog(QString& msg)
-{
-  elidePattern(msg, "X-Plex-Token=", 20);
-  elidePattern(msg, "X-Plex-Token%3D", 20);
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////
-void initLogger()
-{
-  // Note where the logfile is going to be
-  qDebug("Logging to %s", qPrintable(Paths::logDir(Names::MainName() + ".log")));
-
-  // init logging.
-  DestinationPtr dest = DestinationFactory::MakeFileDestination(
-    Paths::logDir(Names::MainName() + ".log"),
-    EnableLogRotationOnOpen,
-    MaxSizeBytes(1024 * 1024),
-    MaxOldLogCount(9));
-
-  Logger::instance().addDestination(dest);
-  Logger::instance().setLoggingLevel(DebugLevel);
-  Logger::instance().setProcessingCallback(processLog);
-
-  qInstallMessageHandler(qtMessageOutput);
-}
-
-static QsLogging::Level logLevelFromString(const QString& str)
-{
-  if (str == "trace")     return QsLogging::Level::TraceLevel;
-  if (str == "debug")     return QsLogging::Level::DebugLevel;
-  if (str == "info")      return QsLogging::Level::InfoLevel;
-  if (str == "warn")      return QsLogging::Level::WarnLevel;
-  if (str == "error")     return QsLogging::Level::ErrorLevel;
-  if (str == "fatal")     return QsLogging::Level::FatalLevel;
-  if (str == "disable")   return QsLogging::Level::OffLevel;
-  // if not valid, use default
-  return QsLogging::Level::DebugLevel;
-}
-
-static void updateLogLevel()
-{
-  QString level = SettingsComponent::Get().value(SETTINGS_SECTION_MAIN, "logLevel").toString();
-  if (level.size())
-  {
-    QLOG_INFO() << "Setting log level to:" << level;
-    Logger::instance().setLoggingLevel(logLevelFromString(level));
-  }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////
-char** appendCommandLineArguments(int *argc, char **argv)
-{
-  static char *newArgs[16];
-  QList<QString> argList;
-
-  // Copy argv list to our StringList
-  for (int i=0; i < *argc; i++)
-  {
-    argList << QString(argv[i]);
-  }
-
-  // add any required additionnal commandline argument
-#if KONVERGO_OPENELEC
-  // on RPI with webengine, OpenGL contexts are shared statically with webengine
-  // which avoids proper reset when switching display mode
-  // On OE we also need that because there is a crash with OZONE otherwise
-  argList << "--disable-gpu";
-#endif
-
-  // with webengine we need those to have a proper scaling of the webview in the window
-  argList << "--enable-viewport";
-  argList << "--enable-viewport-meta";
-
-  // Now rebuild our argc, argv list
-  *argc = argList.size();
-
-  for(int iarg=0; iarg < argList.size(); iarg++)
-  {
-    newArgs[iarg] = (char*)malloc(256);
-    strcpy(newArgs[iarg], argList.value(iarg).toStdString().c_str());
-  }
-
-  return (char**)newArgs;
-}
+QStringList g_qtFlags = {"--enable-viewport", "--enable-viewport-meta", "--disable-gpu", "--disable-web-security"};
 
 /////////////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char *argv[])
 {
   try
   {
-    for (int n = 1; n < argc; n++)
-    {
-      if (strcmp(argv[n], "--licenses") == 0)
-      {
-        QFile licenses(":/misc/licenses.txt");
-        licenses.open(QIODevice::ReadOnly | QIODevice::Text);
-        QByteArray contents = licenses.readAll();
-        printf("%.*s\n", (int)contents.size(), contents.data());
-        return 0;
-      }
-    }
+    QCommandLineParser parser;
+    parser.setApplicationDescription("Plex Media Player");
+    parser.addHelpOption();
+    parser.addVersionOption();
+    parser.addOptions({{{"l", "licenses"}, "Show license information"}});
+    parser.addOptions({{{"a", "from-auto-update"}, "When invoked from auto-update"}});
 
-    int newArgc = argc;
-    char **newArgv = appendCommandLineArguments(&newArgc, argv);
+    char **newArgv = appendCommandLineArguments(argc, argv, g_qtFlags);
+    argc += g_qtFlags.size();
 
     // Suppress SSL related warnings on OSX
     // See https://bugreports.qt.io/browse/QTBUG-43173 for more info
     //
 #ifdef Q_OS_MAC
     qputenv("QT_LOGGING_RULES", "qt.network.ssl.warning=false");
-
-    // Request OpenGL 4.1 if possible on OSX, otherwise it defaults to 2.0
-    // This needs to be done before we create the QGuiApplication
-    //
-    QSurfaceFormat format = QSurfaceFormat::defaultFormat();
-    format.setMajorVersion(3);
-    format.setMinorVersion(2);
-    format.setProfile(QSurfaceFormat::CoreProfile);
-    QSurfaceFormat::setDefaultFormat(format);
 #endif
 
+    // Qt calls setlocale(LC_ALL, "") in a bunch of places, which breaks
+    // float/string processing in mpv and ffmpeg.
+#ifdef Q_OS_UNIX
+    qputenv("LC_ALL", "C");
+    qputenv("LC_NUMERIC", "C");
+#endif
+
+    detectOpenGLEarly();
+
     preinitQt();
-    QGuiApplication app(newArgc, newArgv);
+
+    QGuiApplication app(argc, newArgv);
     app.setWindowIcon(QIcon(":/images/icon.png"));
+
+    // Get the arguments from the app, this is the parsed version of newArgc and newArgv
+    QStringList args = app.arguments();
+
+    // Remove the qt flags above so that our command line parser doesn't get cranky.
+    for (auto flag : g_qtFlags)
+      args.removeAll(flag);
+
+    // Now parse the command line.
+    parser.process(args);
+
+    if (parser.isSet("licenses"))
+    {
+      ShowLicenseInfo();
+      return EXIT_SUCCESS;
+    }
 
     // init breakpad.
     setupCrashDumper();
@@ -231,10 +144,7 @@ int main(int argc, char *argv[])
     Q_UNUSED(signalManager);
 #endif
 
-    initLogger();
-    QLOG_INFO() << "Starting Plex Media Player version:" << qPrintable(Version::GetVersionString()) << "build date:" << qPrintable(Version::GetBuildDate());
-    QLOG_INFO() << qPrintable(QString("  Running on: %1 [%2] arch %3").arg(QSysInfo::prettyProductName()).arg(QSysInfo::kernelVersion()).arg(QSysInfo::currentCpuArchitecture()));
-    QLOG_INFO() << "  Qt Version:" << QT_VERSION_STR << qPrintable(QString("[%1]").arg(QSysInfo::buildAbi()));
+    Log::Init();
 
     // Quit app and apply update if we find one.
     if (UpdateManager::CheckForUpdates())
@@ -243,13 +153,13 @@ int main(int argc, char *argv[])
       return 0;
     }
 
+    detectOpenGLLate();
+
 #ifdef Q_OS_WIN32
     initD3DDevice();
 #endif
 
-#ifdef Q_OS_UNIX
-    setlocale(LC_NUMERIC, "C");
-#endif
+    Codecs::preinitCodecs();
 
     // Initialize all the components. This needs to be done
     // early since most everything else relies on it
@@ -262,31 +172,14 @@ int main(int argc, char *argv[])
 
     QtWebEngine::initialize();
 
-    // Qt and QWebEngineProfile set the locale, which breaks parsing and
-    // formatting float numbers in a few countries.
-#ifdef Q_OS_UNIX
-    setlocale(LC_NUMERIC, "C");
-#endif
-
     // start our helper
     HelperLauncher::Get().connectToHelper();
 
     // load QtWebChannel so that we can register our components with it.
-    QQmlApplicationEngine *engine = KonvergoEngine::Get();
-    KonvergoWindow::RegisterClass();
-    engine->rootContext()->setContextProperty("components", &ComponentManager::Get().getQmlPropertyMap());
+    QQmlApplicationEngine *engine = Globals::Engine();
 
-    // This controls how big the web view will zoom using semantic zoom
-    // over a specific number of pixels and we run out of space for on screen
-    // tiles in chromium. This only happens on OSX since on other platforms
-    // we can use the GPU to transfer tiles directly but we set the limit on all platforms
-    // to keep it consistent.
-    //
-    // See more discussion in: https://github.com/plexinc/plex-media-player/issues/10
-    // The number of pixels here are REAL pixels, the code in webview.qml will compensate
-    // for a higher DevicePixelRatio
-    //
-    engine->rootContext()->setContextProperty("webMaxHeight", 1440);
+    KonvergoWindow::RegisterClass();
+    Globals::SetContextProperty("components", &ComponentManager::Get().getQmlPropertyMap());
 
     // the only way to detect if QML parsing fails is to hook to this signal and then see
     // if we get a valid object passed to it. Any error messages will be reported on stderr
@@ -296,47 +189,41 @@ int main(int argc, char *argv[])
     {
       Q_UNUSED(url);
 
-      if (object == 0)
+      if (object == nullptr)
         throw FatalException(QObject::tr("Failed to parse application engine script."));
 
-      QObject* rootObject = engine->rootObjects().first();
+      KonvergoWindow* window = Globals::MainWindow();
 
-      QObject* webChannel = qvariant_cast<QObject*>(rootObject->property("webChannel"));
+      QObject* webChannel = qvariant_cast<QObject*>(window->property("webChannel"));
       Q_ASSERT(webChannel);
       ComponentManager::Get().setWebChannel(qobject_cast<QWebChannel*>(webChannel));
 
-      KonvergoWindow* window = qobject_cast<KonvergoWindow*>(rootObject);
-      Q_ASSERT(window);
       QObject::connect(uniqueApp, &UniqueApplication::otherApplicationStarted, window, &KonvergoWindow::otherAppFocus);
-
     });
     engine->load(QUrl(QStringLiteral("qrc:/ui/webview.qml")));
 
-    updateLogLevel();
+    Log::UpdateLogLevel();
 
     // run our application
     int ret = app.exec();
 
-    delete KonvergoEngine::Get();
     delete uniqueApp;
+    Globals::EngineDestroy();
 
+    Log::Uninit();
     return ret;
   }
   catch (FatalException& e)
   {
-
     QLOG_FATAL() << "Unhandled FatalException:" << qPrintable(e.message());
+    QApplication errApp(argc, argv);
 
-    QGuiApplication app(argc, argv);
-    QString text = e.message() + "<br>" + QObject::tr("Please visit Plex support forums for support.");
+    auto  msg = new ErrorMessage(e.message(), true);
+    msg->show();
 
-    QQmlApplicationEngine* engine = new QQmlApplicationEngine(NULL);
-    engine->rootContext()->setContextProperty("errorTitle", QObject::tr("A critical error occurred."));
-    engine->rootContext()->setContextProperty("errorText", text);
-    engine->load(QUrl(QStringLiteral("qrc:/ui/errormessage.qml")));
+    errApp.exec();
 
-    app.exec();
+    Log::Uninit();
     return 1;
-
   }
 }

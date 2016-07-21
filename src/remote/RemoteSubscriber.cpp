@@ -62,7 +62,7 @@ void RemoteSubscriber::sendUpdate()
   request.setAttribute(QNetworkRequest::User, m_clientIdentifier);
 
   QVariantMap headers = RemoteComponent::HeaderInformation();
-  foreach (const QString& key, headers.keys())
+  for(const QString& key : headers.keys())
   {
     request.setRawHeader(key.toUtf8(), headers[key].toString().toUtf8());
   }
@@ -92,7 +92,7 @@ void RemoteSubscriber::queueTimeline(quint64 playerCommandID, const QByteArray& 
   QMutexLocker lk(&m_timelineLock);
 
   QDomDocument doc;
-  if (doc.setContent(timelineData) && doc.firstChildElement("MediaContainer").isNull() == false)
+  if (doc.setContent(timelineData) && !doc.firstChildElement("MediaContainer").isNull())
   {
     QDomElement node = doc.firstChildElement("MediaContainer");
     node.setAttribute("commandID", commandId(playerCommandID));
@@ -193,12 +193,12 @@ void RemotePollSubscriber::sendUpdate()
     m_response->write(getTimeline());
 
     m_response->end();
-    m_response = NULL;
+    m_response = nullptr;
   }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
 void RemotePollSubscriber::responseDone()
 {
-  m_response = NULL;
+  m_response = nullptr;
 }

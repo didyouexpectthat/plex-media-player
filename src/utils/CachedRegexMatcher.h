@@ -16,15 +16,17 @@ typedef QList<MatcherValuePair> MatcherValueList;
 class CachedRegexMatcher : public QObject
 {
 public:
-  CachedRegexMatcher(QObject* parent = 0) : QObject(parent) {}
+  explicit CachedRegexMatcher(bool allowMultiplePatterns = true, QObject* parent = nullptr)
+    : QObject(parent), m_allowMultiplePatterns(allowMultiplePatterns) {}
 
   bool addMatcher(const QString& pattern, const QVariant& result);
-  QVariant match(const QString& input);
+  QVariantList match(const QString& input);
   void clear();
 
 private:
   MatcherValueList m_matcherList;
-  QHash<QString, QVariant> m_matcherCache;
+  QHash<QString, QVariantList> m_matcherCache;
+  bool m_allowMultiplePatterns;
 };
 
 #endif //KONVERGO_CACHEDREGEXMATCHER_H

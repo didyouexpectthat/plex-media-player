@@ -11,7 +11,12 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QList>
+#include <QSettings>
 #include "input/InputComponent.h"
+#include "system/SystemComponent.h"
+#include "Version.h"
+
+#define OLDEST_PREVIOUS_VERSION_KEY "oldestPreviousVersion"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 SettingsComponent::SettingsComponent(QObject *parent) : ComponentBase(parent), m_settingsVersion(-1)
@@ -19,15 +24,52 @@ SettingsComponent::SettingsComponent(QObject *parent) : ComponentBase(parent), m
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-void SettingsComponent::componentPostInitalize()
+void SettingsComponent::componentPostInitialize()
 {
-  InputComponent::Get().registerHostCommand("fullscreen", this, "toggleFullScreen");
+  InputComponent::Get().registerHostCommand("cycle_setting", this, "cycleSetting");
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-void SettingsComponent::toggleFullScreen(const QString& args)
+void SettingsComponent::cycleSetting(const QString& args)
 {
-  setValue(SETTINGS_SECTION_MAIN, "fullscreen", !value(SETTINGS_SECTION_MAIN, "fullscreen").toBool());
+  QString settingName = args;
+  QStringList sub = settingName.split(".");
+  if (sub.size() != 2)
+  {
+    QLOG_ERROR() << "Setting must be in the form section.name but got:" << settingName;
+    return;
+  }
+  QString sectionID = sub[0];
+  QString valueName = sub[1];
+  SettingsSection* section = getSection(sectionID);
+  if (!section)
+  {
+    QLOG_ERROR() << "Section" << sectionID << "is unknown";
+    return;
+  }
+  QVariantList values = section->possibleValues(valueName);
+  if (values.size() == 0)
+  {
+    QLOG_ERROR() << "Setting" << settingName << "is unknown or is not cycleable.";
+    return;
+  }
+  QVariant currentValue = section->value(valueName);
+  int nextValueIndex = 0;
+  for (int n = 0; n < values.size(); n++)
+  {
+    if (currentValue == values[n].toMap()["value"])
+    {
+      nextValueIndex = n + 1;
+      break;
+    }
+  }
+  if (nextValueIndex >= values.size())
+    nextValueIndex = 0;
+  auto nextSetting = values[nextValueIndex].toMap();
+  auto nextValue = nextSetting["value"];
+  QLOG_DEBUG() << "Setting" << settingName << "to" << nextValue;
+  setValue(sectionID, valueName, nextValue);
+  emit SystemComponent::Get().settingsMessage(valueName, nextSetting["title"].toString());
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -49,7 +91,7 @@ QVariant SettingsComponent::allValues(const QString& section)
   if (section.isEmpty())
   {
     QVariantMap all;
-    foreach (const QString& sname, m_sections.keys())
+    for(const QString& sname : m_sections.keys())
       all[sname] = m_sections[sname]->allValues();
     return all;
   }
@@ -139,7 +181,7 @@ void SettingsComponent::loadConf(const QString& path, bool storage)
 
   QJsonObject jsonSections = json["sections"].toObject();
 
-  foreach (const QString& section, jsonSections.keys())
+  for(const QString& section : jsonSections.keys())
   {
     QJsonObject jsonSection = jsonSections[section].toObject();
 
@@ -157,7 +199,7 @@ void SettingsComponent::loadConf(const QString& path, bool storage)
       continue;
     }
 
-    foreach (const QString& setting, jsonSection.keys())
+    for(const QString& setting : jsonSection.keys())
       sec->setValue(setting, jsonSection.value(setting).toVariant());
   }
 }
@@ -165,9 +207,15 @@ void SettingsComponent::loadConf(const QString& path, bool storage)
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void SettingsComponent::saveSettings()
 {
+  if (m_oldestPreviousVersion.isEmpty())
+  {
+    QLOG_ERROR() << "Not writing settings: uninitialized.\n";
+    return;
+  }
+
   QVariantMap sections;
 
-  foreach(SettingsSection* section, m_sections.values())
+  for(SettingsSection* section : m_sections.values())
   {
     if (!section->isStorage())
       sections.insert(section->sectionName(), section->allValues());
@@ -184,7 +232,7 @@ void SettingsComponent::saveStorage()
 {
   QVariantMap storage;
 
-  foreach(SettingsSection* section, m_sections.values())
+  for(SettingsSection* section : m_sections.values())
   {
     if (section->isStorage())
       storage.insert(section->sectionName(), section->allValues());
@@ -296,14 +344,14 @@ void SettingsComponent::removeValue(const QString &sectionOrKey)
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void SettingsComponent::resetToDefault()
 {
-  foreach(SettingsSection *section, m_sections)
+  for(SettingsSection *section : m_sections)
   {
    section->resetToDefault();
   }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-struct section_order_index
+struct SectionOrderIndex
 {
   inline bool operator ()(SettingsSection* a, SettingsSection* b)
   {
@@ -317,9 +365,9 @@ QVariantList SettingsComponent::settingDescriptions()
   QJsonArray desc;
 
   QList<SettingsSection*> sectionList = m_sections.values();
-  std::sort(sectionList.begin(), sectionList.end(), section_order_index());
+  std::sort(sectionList.begin(), sectionList.end(), SectionOrderIndex());
 
-  foreach(SettingsSection* section, sectionList)
+  for(SettingsSection* section : sectionList)
   {
     if (!section->isHidden())
       desc.push_back(QJsonValue::fromVariant(section->descriptions()));
@@ -347,7 +395,7 @@ bool SettingsComponent::loadDescription()
 
   m_sectionIndex = 0;
 
-  foreach(const QJsonValue& val, doc.array())
+  for(const QJsonValue& val : doc.array())
   {
     if (!val.isObject())
     {
@@ -383,13 +431,13 @@ void SettingsComponent::parseSection(const QJsonObject& sectionObject)
 
   int platformMask = platformMaskFromObject(sectionObject);
 
-  SettingsSection* section = new SettingsSection(sectionName, (quint8)platformMask, m_sectionIndex ++, this);
+  auto  section = new SettingsSection(sectionName, (quint8)platformMask, m_sectionIndex ++, this);
   section->setHidden(sectionObject.value("hidden").toBool(false));
   section->setStorage(sectionObject.value("storage").toBool(false));
 
   auto values = sectionObject.value("values").toArray();
   int order = 0;
-  foreach(auto val, values)
+  for(auto val : values)
   {
     if (!val.isObject())
       continue;
@@ -404,7 +452,7 @@ void SettingsComponent::parseSection(const QJsonObject& sectionObject)
     {
       defaultval = QVariant();
       // Whichever default matches the current platform first is used.
-      foreach(const auto& v, defaults.toArray())
+      for(const auto& v : defaults.toArray())
       {
         auto vobj = v.toObject();
         int defPlatformMask = platformMaskFromObject(vobj);
@@ -427,7 +475,7 @@ void SettingsComponent::parseSection(const QJsonObject& sectionObject)
     if (valobj.contains("possible_values") && valobj.value("possible_values").isArray())
     {
       auto list = valobj.value("possible_values").toArray();
-      foreach(const auto& v, list)
+      for(const auto& v : list)
       {
         int platform = PLATFORM_ANY;
 
@@ -469,7 +517,7 @@ int SettingsComponent::platformMaskFromObject(const QJsonObject& object)
     // platforms can be both array or a single string
     if (platforms.isArray())
     {
-      foreach(const QJsonValue& pl, platforms.toArray())
+      for(const QJsonValue& pl : platforms.toArray())
       {
         if (!pl.isString())
           continue;
@@ -487,7 +535,7 @@ int SettingsComponent::platformMaskFromObject(const QJsonObject& object)
     QJsonValue val = object.value("platforms_excluded");
     if (val.isArray())
     {
-      foreach(const QJsonValue& pl, val.toArray())
+      for(const QJsonValue& pl : val.toArray())
       {
         if (!pl.isString())
           continue;
@@ -531,13 +579,16 @@ bool SettingsComponent::componentInitialize()
   if (!loadDescription())
     return false;
 
+  // Must be called before we possibly write the config file.
+  setupVersion();
+
   load();
 
   // add our AudioSettingsController that will inspect audio settings and react.
   // then run the signal the first time to make sure that we set the proper visibility
   // on the items from the start.
   //
-  AudioSettingsController* ctrl = new AudioSettingsController(this);
+  auto  ctrl = new AudioSettingsController(this);
   QVariantMap val;
   val.insert("devicetype", value(SETTINGS_SECTION_AUDIO, "devicetype"));
   val.insert("advanced", value(SETTINGS_SECTION_AUDIO, "advanced"));
@@ -545,6 +596,25 @@ bool SettingsComponent::componentInitialize()
   connect(ctrl, &AudioSettingsController::settingsUpdated, this, &SettingsComponent::groupUpdate);
 
   return true;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void SettingsComponent::setupVersion()
+{
+  QSettings settings;
+  m_oldestPreviousVersion = settings.value(OLDEST_PREVIOUS_VERSION_KEY).toString();
+  if (m_oldestPreviousVersion.isEmpty())
+  {
+    // Version key was not present. It could still be a pre-1.1 PMP install,
+    // so here we try to find out whether this is the very first install, or
+    // if an older one exists.
+    QFile configFile(Paths::dataDir("plexmediaplayer.conf"));
+    if (configFile.exists())
+      m_oldestPreviousVersion = "legacy";
+    else
+      m_oldestPreviousVersion = Version::GetVersionString();
+    settings.setValue(OLDEST_PREVIOUS_VERSION_KEY, m_oldestPreviousVersion);
+  }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -559,7 +629,7 @@ void SettingsComponent::setUserRoleList(const QStringList& userRoles)
 
   values << stable;
 
-  foreach(const QString& role, userRoles)
+  for(const QString& role : userRoles)
   {
     QVariantMap channel;
     int value = 0;
@@ -588,5 +658,35 @@ void SettingsComponent::setUserRoleList(const QStringList& userRoles)
   }
 
   updatePossibleValues(SETTINGS_SECTION_MAIN, "updateChannel", values);
-
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////
+bool SettingsComponent::resetAndSaveOldConfiguration()
+{
+  QFile settingsFile(Paths::dataDir("plexmediaplayer.conf"));
+  return settingsFile.rename(Paths::dataDir("plexmediaplayer.conf.old"));
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+QString SettingsComponent::getWebClientUrl()
+{
+  auto url = SettingsComponent::Get().value(SETTINGS_SECTION_PATH, "startupurl").toString();
+
+  // Transition to the new value so that old users are not screwed.
+  if (url == "qrc:/konvergo/index.html")
+  {
+    SettingsComponent::Get().setValue(SETTINGS_SECTION_PATH, "startupurl", "bundled");
+    url = "bundled";
+  }
+
+  if (url == "bundled")
+  {
+    auto path = Paths::webClientPath();
+    if (path.startsWith("/"))
+      return "file://" + path;
+    return "file:///" + path;
+  }
+
+  return url;
+}
+

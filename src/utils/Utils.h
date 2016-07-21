@@ -3,12 +3,15 @@
 
 #include <QString>
 #include <QUrl>
+#include <QByteArray>
 #include <QVariant>
 #include <QException>
 #include <QtCore/qjsondocument.h>
 
 #ifdef Q_OS_MAC
   #include "osx/OSXUtils.h"
+#elif defined(Q_OS_WIN)
+  #include "win/WinUtils.h"
 #endif
 
 #define DEFINE_SINGLETON(cls) \
@@ -26,7 +29,7 @@ public:
   explicit FatalException(const QString& message) : m_message(message) {}
   const QString& message() const { return m_message; }
 
-  ~FatalException() throw() { }
+  ~FatalException() throw() override { }
 
 private:
   QString m_message;
@@ -54,6 +57,7 @@ namespace Utils
   QString ComputerName();
   QString PrimaryIPv4Address();
   QString ClientUUID();
+  bool safelyWriteFile(const QString& filename, const QByteArray& data);
 }
 
 #endif // UTILS_H

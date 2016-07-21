@@ -5,8 +5,8 @@ find_library(COCOA Cocoa)
 find_Library(CARBON Carbon)
 find_library(SECURITY Security)
 
-set(OS_LIBS ${FOUNDATION} ${APPKIT} ${IOKIT} ${COCOA} ${SECURITY} ${CARBON} spmediakeytap)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mmacosx-version-min=10.9 -fno-omit-frame-pointer")
+set(OS_LIBS ${FOUNDATION} ${APPKIT} ${IOKIT} ${COCOA} ${SECURITY} ${CARBON} spmediakeytap hidremote)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mmacosx-version-min=10.9 -fno-omit-frame-pointer")
 set(WARNINGS "-Wall")
 
@@ -18,4 +18,4 @@ if(${UPDATER_PATH} MATCHES "UPDATER_PATH-NOTFOUND")
 endif(${UPDATER_PATH} MATCHES "UPDATER_PATH-NOTFOUND")
 
 set(INSTALL_BIN_DIR .)
-set(INSTALL_RESOURCE_DIR Contents/Resources)
+set(INSTALL_RESOURCE_DIR Resources)

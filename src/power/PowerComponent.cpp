@@ -5,6 +5,7 @@
 #include "PowerComponent.h"
 #include "player/PlayerComponent.h"
 #include "input/InputComponent.h"
+#include "settings/SettingsComponent.h"
 
 #ifdef Q_OS_MAC
 #include "PowerComponentMac.h"
@@ -43,11 +44,8 @@ PowerComponent& PowerComponent::Get()
 bool PowerComponent::componentInitialize()
 {
   PlayerComponent* player = &PlayerComponent::Get();
-  if (!player)
-    return false;
 
-  connect(player, &PlayerComponent::playing, this, &PowerComponent::playbackStarted);
-  connect(player, &PlayerComponent::playbackEnded, this, &PowerComponent::playbackEnded);
+  connect(player, &PlayerComponent::playbackActive, this, &PowerComponent::playbackActive);
 
   return true;
 }
@@ -62,11 +60,22 @@ void PowerComponent::setFullscreenState(bool fullscreen)
 /////////////////////////////////////////////////////////////////////////////////////////
 void PowerComponent::redecideScreeensaverState()
 {
-  bool enable_os_screensaver = !m_fullscreenState && !m_videoPlaying;
-  if (m_currentScreensaverEnabled != enable_os_screensaver)
+  bool enableOsScreensaver = !m_videoPlaying;
+
+  // by default we don't allow the fullscreen state affect sleep state, but we want to
+  // have a hidden option to allow system sleep and screensaver when in fullscreen.
+  //
+  bool preventSystemScreensaver = SettingsComponent::Get().value(SETTINGS_SECTION_MAIN, "preventSystemScreensaver").toBool();
+#ifdef KONVERGO_OPENELEC
+  preventSystemScreensaver = true;
+#endif
+  if (preventSystemScreensaver)
+    enableOsScreensaver &= !m_fullscreenState;
+
+  if (m_currentScreensaverEnabled != enableOsScreensaver)
   {
-    m_currentScreensaverEnabled = enable_os_screensaver;
-    if (enable_os_screensaver)
+    m_currentScreensaverEnabled = enableOsScreensaver;
+    if (enableOsScreensaver)
     {
       QLOG_DEBUG() << "Enabling OS screensaver";
       doEnableScreensaver();
@@ -82,16 +91,9 @@ void PowerComponent::redecideScreeensaverState()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-void PowerComponent::playbackStarted()
+void PowerComponent::playbackActive(bool active)
 {
-  m_videoPlaying = true;
-  redecideScreeensaverState();
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////
-void PowerComponent::playbackEnded()
-{
-  m_videoPlaying = false;
+  m_videoPlaying = active;
   redecideScreeensaverState();
 }
 
@@ -102,3 +104,14 @@ void PowerComponent::componentPostInitialize()
   InputComponent::Get().registerHostCommand("reboot", this, "Reboot");
   InputComponent::Get().registerHostCommand("suspend", this, "Suspend");
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////
+bool PowerComponent::checkCap(PowerCapabilities capability)
+{
+  if (!SettingsComponent::Get().value(SETTINGS_SECTION_MAIN, "showPowerOptions").toBool())
+    return false;
+
+  return (getPowerCapabilities() & capability);
+}
+
+

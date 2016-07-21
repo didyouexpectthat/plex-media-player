@@ -16,6 +16,7 @@
 #define SETTINGS_SECTION_OVERRIDES "overrides"
 #define SETTINGS_SECTION_CEC "cec"
 #define SETTINGS_SECTION_OPENELEC "openelec"
+#define SETTINGS_SECTION_APPLEREMOTE "appleremote"
 
 #define AUDIO_DEVICE_TYPE_BASIC "basic"
 #define AUDIO_DEVICE_TYPE_SPDIF "spdif"
@@ -31,18 +32,15 @@ class SettingsComponent : public ComponentBase
   DEFINE_SINGLETON(SettingsComponent);
 
 public:
-  bool componentInitialize();
-  void componentPostInitalize();
+  bool componentInitialize() override;
+  void componentPostInitialize() override;
 
-  const char* componentName() { return "settings"; }
-  bool componentExport() { return true; }
+  const char* componentName() override { return "settings"; }
+  bool componentExport() override { return true; }
 
   SettingsSection* getSection(const QString& sectionID)
   {
-    if (m_sections.contains(sectionID))
-      return m_sections.value(sectionID);
-    else
-      return nullptr;
+    return m_sections.value(sectionID, nullptr);
   }
 
   // JS interface
@@ -53,9 +51,10 @@ public:
   Q_INVOKABLE void removeValue(const QString& sectionOrKey);
   Q_INVOKABLE void resetToDefault();
   Q_INVOKABLE QVariantList settingDescriptions();
+  Q_INVOKABLE QString getWebClientUrl();
 
   // host commands
-  Q_SLOT void toggleFullScreen(const QString& args);
+  Q_SLOT void cycleSetting(const QString& args);
 
   void updatePossibleValues(const QString& sectionID, const QString& key, const QVariantList& possibleValues);
 
@@ -69,20 +68,34 @@ public:
 
   // A hack to load a value from the config file at very early init time, before
   // the SettingsComponent is created.
+  //
   static QVariant readPreinitValue(const QString& sectionID, const QString& key);
 
+  // Moves the current settings file to plexmediaplayer.conf.old to make way for new
+  // configuration.
+  //
+  static bool resetAndSaveOldConfiguration();
+
+  QString oldestPreviousVersion() const
+  {
+    return m_oldestPreviousVersion;
+  }
+
 private:
-  explicit SettingsComponent(QObject *parent = 0);
+  explicit SettingsComponent(QObject *parent = nullptr);
   bool loadDescription();
   void parseSection(const QJsonObject& sectionObject);
   int platformMaskFromObject(const QJsonObject& object);
   Platform platformFromString(const QString& platformString);
   void saveSection(SettingsSection* section);
+  void setupVersion();
 
   QMap<QString, SettingsSection*> m_sections;
 
   int m_settingsVersion;
   int m_sectionIndex;
+
+  QString m_oldestPreviousVersion;
 
   void loadConf(const QString& path, bool storage);
 };

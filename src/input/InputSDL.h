@@ -32,7 +32,7 @@ class InputSDLWorker : public QObject
   Q_OBJECT
 
 public:
-  InputSDLWorker(QObject* parent) : QObject(parent) {}
+  explicit InputSDLWorker(QObject* parent) : QObject(parent) {}
 
 public slots:
   void run();
@@ -40,15 +40,17 @@ public slots:
   void close();
 
 signals:
-  void receivedInput(const QString& source, const QString& keycode, float amount = 1.0);
+  void receivedInput(const QString& source, const QString& keycode, InputBase::InputkeyState keyState);
 
 private:
   void refreshJoystickList();
   QString nameForId(SDL_JoystickID id);
 
-  SDLTimeStampMap m_buttonTimestamps;
   SDLJoystickMap m_joysticks;
-  QByteArray  m_axisState;
+
+  // map axis to up = true or down = false
+  QHash<quint8, bool> m_axisState;
+  QString m_lastHat;
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -56,11 +58,11 @@ class InputSDL : public InputBase
 {
   Q_OBJECT
 public:
-  InputSDL(QObject* parent);
-  ~InputSDL();
+  explicit InputSDL(QObject* parent);
+  ~InputSDL() override;
   
-  virtual const char* inputName() { return "SDL"; }
-  virtual bool initInput();
+  const char* inputName() override { return "SDL"; }
+  bool initInput() override;
   
   void close();
 private:

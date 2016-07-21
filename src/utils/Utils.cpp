@@ -1,7 +1,6 @@
 #include "Utils.h"
 #include <QtGlobal>
 #include <QStandardPaths>
-#include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
 #include <QProcess>
@@ -11,11 +10,12 @@
 #include <QVariant>
 #include <qnetworkinterface.h>
 #include <QUuid>
+#include <QFile>
+#include <QSaveFile>
 
 #include "settings/SettingsComponent.h"
 #include "settings/SettingsSection.h"
 
-#include "osx/OSXUtils.h"
 #include "QsLog.h"
 
 
@@ -103,18 +103,15 @@ QString Utils::CurrentUserId()
 QString Utils::PrimaryIPv4Address()
 {
   QList<QNetworkInterface> ifs = QNetworkInterface::allInterfaces();
-  foreach(const QNetworkInterface& iface, ifs)
+  for(const QNetworkInterface& iface : ifs)
   {
     if (iface.isValid() && iface.flags() & QNetworkInterface::IsUp)
     {
       QList<QHostAddress> addresses = iface.allAddresses();
-      foreach(const QHostAddress& addr, addresses)
+      for(const QHostAddress& addr : addresses)
       {
         if (!addr.isLoopback() && !addr.isMulticast() && addr.protocol() == QAbstractSocket::IPv4Protocol)
-        {
-          QLOG_DEBUG() << "I think that" << addr.toString() << "is my primary address";
           return addr.toString();
-        }
       }
     }
   }
@@ -133,4 +130,14 @@ QString Utils::ClientUUID()
     return newUUID;
   }
   return storedUUID;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+bool Utils::safelyWriteFile(const QString& filename, const QByteArray& data)
+{
+  QSaveFile file(filename);
+  if (!file.open(QIODevice::WriteOnly))
+    return false;
+  file.write(data);
+  return file.commit();
 }

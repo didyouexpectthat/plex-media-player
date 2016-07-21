@@ -8,35 +8,47 @@ class PowerComponent : public ComponentBase
 {
   Q_OBJECT
 public:
+
+  enum PowerCapabilities
+  {
+    CAP_POWER_OFF = 0x01,
+    CAP_REBOOT = 0x02,
+    CAP_SUSPEND = 0x04,
+    CAP_RELAUNCH = 0x08
+  };
+
   static PowerComponent& Get();
 
-  PowerComponent(QObject* parent = 0)
+  explicit PowerComponent(QObject* parent = nullptr)
   : ComponentBase(parent),
     m_currentScreensaverEnabled(true),
     m_fullscreenState(false),
     m_videoPlaying(false)
     { }
 
-  virtual bool componentInitialize();
-  virtual bool componentExport() { return true; }
-  virtual const char* componentName() { return "power"; }
-  virtual void componentPostInitialize();
+  bool componentInitialize() override;
+  bool componentExport() override { return true; }
+  const char* componentName() override { return "power"; }
+  void componentPostInitialize() override;
 
   void setFullscreenState(bool fullscreen);
 
 public Q_SLOTS:
-  virtual bool canPowerOff() { return false; }
-  virtual bool canReboot() { return false; }
-  virtual bool canSuspend() { return false; }
-  virtual bool canRelaunch() { return false; }
+  bool checkCap(PowerCapabilities capability);
+
+  bool canPowerOff() { return checkCap(CAP_POWER_OFF); }
+  bool canReboot() { return checkCap(CAP_REBOOT); }
+  bool canSuspend() { return checkCap(CAP_SUSPEND); }
+  bool canRelaunch() { return checkCap(CAP_RELAUNCH); }
+
+  virtual int getPowerCapabilities() { return CAP_RELAUNCH; }
 
   virtual bool PowerOff() { return false; }
   virtual bool Reboot() { return false; }
   virtual bool Suspend() { return false; }
 
 private Q_SLOTS:
-  void playbackStarted();
-  void playbackEnded();
+  void playbackActive(bool active);
 
 Q_SIGNALS:
   void screenSaverEnabled();

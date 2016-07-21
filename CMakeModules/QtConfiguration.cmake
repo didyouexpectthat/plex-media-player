@@ -9,30 +9,34 @@ if(NOT IS_DIRECTORY ${QTROOT})
   download_deps(
 		"plexmediaplayer-qt"
 		DIRECTORY dir
-		DEPHASH QT_DEPS_HASH
+		DEPHASH_VAR QT_DEPS_HASH
     ARTIFACTNAME konvergo-qt
-    ${WINARCHSTR}
     DYLIB_SCRIPT_PATH ${PROJECT_SOURCE_DIR}/scripts/fix-install-names.py
 	)
   set(QTROOT ${dir})
+  
+  # Write qt.conf in the Qt depends directory so that the Qt tools can find QML files
+  set(QTCONFCONTENT "[Paths]
+    Prefix=${QTROOT}
+    ")
+  file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})
 endif()
+
+message(STATUS "Qt root directory: ${QTROOT}")
+
 list(APPEND CMAKE_FIND_ROOT_PATH ${QTROOT})
 list(APPEND CMAKE_PREFIX_PATH ${QTROOT})
 include_directories(${QTROOT}/include)
 
-# Write qt.conf in the Qt depends directory so that the Qt tools can find QML files
-set(QTCONFCONTENT "[Paths]
-Prefix=${QTROOT}
-")
-
-file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})
-
 set(REQUIRED_QT_VERSION "5.6.0")
 
-message(STATUS ${QTROOT})
-
 set(QTCONFIGROOT ${QTROOT}/lib/cmake/Qt5)
-set(components Core Network WebChannel Qml Quick Xml WebEngine)
+set(components Core Network WebChannel Qml Quick Xml WebEngine Widgets)
+
+if(UNIX AND (NOT APPLE) AND ((NOT BUILD_TARGET STREQUAL "RPI")))
+  add_definitions(-DUSE_X11EXTRAS)
+  set(components ${components} X11Extras)
+endif()
 
 if(OPENELEC)
   set(components ${components} DBus)
@@ -68,3 +72,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${QT5_CFLAGS}")
 
 set(CMAKE_REQUIRED_INCLUDES ${Qt5WebEngine_INCLUDE_DIRS};${Qt5WebEngine_PRIVATE_INCLUDE_DIRS})
 set(CMAKE_REQUIRED_LIBRARIES ${QT5_LIBRARIES})
+
+include(CheckCXXSourceCompiles)
+
+CHECK_CXX_SOURCE_COMPILES(
+"
+  #include <QSurfaceFormat>
+
+  int main(int argc, char** argv) {
+    QSurfaceFormat::FormatOption o = QSurfaceFormat::UseOptimalOrientation;
+    return 0;
+  }
+" QT5_HAVE_OPTIMALORIENTATION)
+
+if(QT5_HAVE_OPTIMALORIENTATION)
+  message(STATUS "QSurfaceFormat::UseOptimalOrientation found")
+  add_definitions(-DHAVE_OPTIMALORIENTATION)
+endif()

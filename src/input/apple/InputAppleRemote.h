@@ -16,20 +16,21 @@ typedef void delegate;
 class InputAppleRemote : public InputBase
 {
 public:
-  InputAppleRemote(QObject* parent = 0) : InputBase(parent) { }
-  virtual const char* inputName() { return "AppleRemote"; }
-  virtual bool initInput();
+  explicit InputAppleRemote(QObject* parent = nullptr) : InputBase(parent), m_remoteID(0) { }
+  const char* inputName() override { return "AppleRemote"; }
+  bool initInput() override;
   
   void remoteButtonEvent(quint8 code, bool pressed, const QString& name);
   
   void addRemote(const QString& name);
   void removeRemote(const QString& name);
   void addRemoteFailed(const QString& error);
-  
+  void changeRemoteID(quint32 newID);
+
 private:
   delegate* m_delegate;
   QStringList m_remotes;
-  
+  quint32 m_remoteID;
 };
 
 #endif

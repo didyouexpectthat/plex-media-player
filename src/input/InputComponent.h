@@ -1,21 +1,34 @@
 #ifndef INPUTADAPTER_H
 #define INPUTADAPTER_H
 
-#include <QThread>
-#include <QVariantMap>
 #include "ComponentManager.h"
 #include "InputMapping.h"
+
+#include <QThread>
+#include <QVariantMap>
+#include <QTimer>
+#include <QTime>
+
+#include <functional>
 
 class InputBase : public QObject
 {
   Q_OBJECT
 public:
-  InputBase(QObject* parent = 0) : QObject(parent) { }
+  explicit InputBase(QObject* parent = nullptr) : QObject(parent) { qRegisterMetaType<InputBase::InputkeyState>("InputkeyState"); }
   virtual bool initInput() = 0;
   virtual const char* inputName() = 0;
   
+  enum InputkeyState
+  {
+    KeyDown,
+    KeyUp,
+    KeyPressed
+  };
+  Q_ENUM(InputkeyState)
+
 signals:
-  void receivedInput(const QString& source, const QString& keycode, float amount = 1.0);
+  void receivedInput(const QString& source, const QString& keycode, InputkeyState keystate);
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -68,9 +81,10 @@ signals:
 
 struct ReceiverSlot
 {
-  QObject* receiver;
-  QByteArray slot;
-  bool hasArguments;
+  std::function<void(void)> m_function;
+  QObject* m_receiver;
+  QByteArray m_slot;
+  bool m_hasArguments;
 };
 
 class InputComponent : public ComponentBase
@@ -79,25 +93,44 @@ class InputComponent : public ComponentBase
   DEFINE_SINGLETON(InputComponent);
 
 public:
-  virtual const char* componentName() { return "input"; }
-  virtual bool componentExport() { return true; }
-  virtual bool componentInitialize();
+  const char* componentName() override { return "input"; }
+  bool componentExport() override { return true; }
+  bool componentInitialize() override;
 
   void registerHostCommand(const QString& command, QObject* receiver, const char* slot);
+  void registerHostCommand(const QString& command, std::function<void(void)> function);
+
+  // Called by web to actually execute pending actions. This is done in reaction
+  // to hostInput(). The actions parameter contains a list of actions which
+  // should be actually dispatched.
+  Q_INVOKABLE void executeActions(const QStringList& actions);
 
 signals:
-  void receivedAction(const QString& action);
+  // Always emitted when any input arrives
+  void receivedInput();
+
+  // Emitted when new input arrives. Each entry is an action that matches
+  // in the keymap, such as "host:fullscreen".
+  void hostInput(const QStringList& actions);
 
 private Q_SLOTS:
-  void remapInput(const QString& source, const QString& keycode, float amount = 1.0);
+  void remapInput(const QString& source, const QString& keycode, InputBase::InputkeyState keyState);
   
 private:
-  InputComponent(QObject *parent = 0);
-  bool addInput(InputBase* input);
+  explicit InputComponent(QObject *parent = nullptr);
+  bool addInput(InputBase* base);
+  void handleAction(const QString& action);
 
   QHash<QString, ReceiverSlot*> m_hostCommands;
   QList<InputBase*> m_inputs;
   InputMapping* m_mappings;
+
+  QTimer* m_autoRepeatTimer;
+  QStringList m_autoRepeatActions;
+  qint32 m_autoRepeatCount;
+
+  QVariantMap m_currentLongPressAction;
+  QTime m_longHoldTimer;
 };
 
 #endif // INPUTADAPTER_H

@@ -18,12 +18,10 @@ class InputCECWorker;
 class InputCEC : public InputBase
 {
 public:
-  InputCEC(QObject* parent);
+  explicit InputCEC(QObject* parent);
 
-  virtual const char* inputName()
-  { return CEC_INPUT_NAME; }
-
-  virtual bool initInput();
+  const char* inputName() override { return CEC_INPUT_NAME; }
+  bool initInput() override;
 
 private:
   QThread* m_cecThread;
@@ -35,14 +33,14 @@ class InputCECWorker : public QObject
 {
 Q_OBJECT
 public:
-  InputCECWorker(QObject* parent = 0) : QObject(parent), m_adapter(0), m_adapterPort("")
+  explicit InputCECWorker(QObject* parent = nullptr) : QObject(parent), m_adapter(nullptr), m_adapterPort("")
   {
   }
 
-  ~InputCECWorker();
+  ~InputCECWorker() override;
 
   Q_SLOT bool init();
-  Q_SIGNAL void receivedInput(const QString& source, const QString& keycode, float amount);
+  Q_SIGNAL void receivedInput(const QString& source, const QString& keycode, InputBase::InputkeyState keyState);
 
 public slots:
   void checkAdapter();
@@ -53,13 +51,12 @@ private:
   bool openAdapter();
   void closeAdapter();
 
-  QString getCommandString(cec_user_control_code code, unsigned int duration);
-  void sendReceivedInput(const QString& source, const QString& keycode, float amount = 1.0);
+  QString getCommandString(cec_user_control_code code);
+  void sendReceivedInput(const QString& source, const QString& keycode, InputBase::InputkeyState keyState);
   QString getCommandParamsList(cec_command command);
 
   // libcec callbacks
   static int CecLogMessage(void* cbParam, const cec_log_message message);
-  static int CecKeyPress(void* cbParam, const cec_keypress key);
   static int CecCommand(void* cbParam, const cec_command command);
   static int CecAlert(void* cbParam, const libcec_alert type, const libcec_parameter param);
 

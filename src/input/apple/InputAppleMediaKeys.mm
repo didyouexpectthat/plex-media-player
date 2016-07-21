@@ -9,18 +9,18 @@
 @interface MediaKeysDelegate : NSObject
 {
   SPMediaKeyTap* keyTap;
-  InputAppleMediaKeys* m_input;
+  InputAppleMediaKeys* input;
 }
 -(instancetype)initWithInput:(InputAppleMediaKeys*)input;
 @end
 
 @implementation MediaKeysDelegate
 
-- (instancetype)initWithInput:(InputAppleMediaKeys*)input
+- (instancetype)initWithInput:(InputAppleMediaKeys*)input_
 {
   self = [super init];
   if (self) {
-    m_input = input;
+    input = input_;
     keyTap = [[SPMediaKeyTap alloc] initWithDelegate:self];
     if ([SPMediaKeyTap usesGlobalMediaKeyTap])
       [keyTap startWatchingMediaKeys];
@@ -28,6 +28,11 @@
       QLOG_WARN() << "Could not grab global media keys";
   }
   return self;
+}
+
+- (void)dealloc
+{
+  [super dealloc];
 }
 
 -(void)mediaKeyTap:(SPMediaKeyTap *)keyTap receivedMediaKeyEvent:(NSEvent *)event
@@ -38,30 +43,28 @@
 
   QString keyPressed;
 
-  if (keyIsPressed) {
-    switch (keyCode) {
-      case NX_KEYTYPE_PLAY:
-        keyPressed = INPUT_KEY_PLAY;
-        break;
-      case NX_KEYTYPE_FAST:
-        keyPressed = "KEY_FAST";
-        break;
-      case NX_KEYTYPE_REWIND:
-        keyPressed = "KEY_REWIND";
-        break;
-      case NX_KEYTYPE_NEXT:
-        keyPressed = INPUT_KEY_NEXT;
-        break;
-      case NX_KEYTYPE_PREVIOUS:
-        keyPressed = INPUT_KEY_PREV;
-        break;
-      default:
-        break;
-        // More cases defined in hidsystem/ev_keymap.h
-    }
-
-    emit m_input->receivedInput("AppleMediaKeys", keyPressed);
+  switch (keyCode) {
+    case NX_KEYTYPE_PLAY:
+      keyPressed = INPUT_KEY_PLAY;
+      break;
+    case NX_KEYTYPE_FAST:
+      keyPressed = "KEY_FAST";
+      break;
+    case NX_KEYTYPE_REWIND:
+      keyPressed = "KEY_REWIND";
+      break;
+    case NX_KEYTYPE_NEXT:
+      keyPressed = INPUT_KEY_NEXT;
+      break;
+    case NX_KEYTYPE_PREVIOUS:
+      keyPressed = INPUT_KEY_PREV;
+      break;
+    default:
+      break;
+      // More cases defined in hidsystem/ev_keymap.h
   }
+
+  emit input->receivedInput("AppleMediaKeys", keyPressed, keyIsPressed ? InputBase::KeyDown : InputBase::KeyUp);
 }
 
 @end

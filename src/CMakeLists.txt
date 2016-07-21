@@ -2,8 +2,10 @@ include_directories(
   ${CMAKE_SOURCE_DIR}/external/qhttp/src
   ${CMAKE_SOURCE_DIR}/external/qslog
   ${CMAKE_SOURCE_DIR}/external/SPMediaKeyTap
+  ${CMAKE_SOURCE_DIR}/external/HIDRemote
   ${CMAKE_SOURCE_DIR}/external/plistparser
   ${CMAKE_SOURCE_DIR}/src/player
+  core
   shared
 )
 
@@ -23,6 +25,7 @@ if(BREAKPAD_FOUND)
 endif()
 
 add_subdirectory(shared)
+add_subdirectory(core)
 add_subdirectory(display)
 add_subdirectory(player)
 add_subdirectory(utils)
@@ -37,20 +40,7 @@ add_subdirectory(remote)
 add_subdirectory(tools)
 
 get_property(ALL_SRCS GLOBAL PROPERTY SRCS_LIST)
-set(MAIN_SRCS
-  Version.h
-  ComponentManager.cpp
-  ComponentManager.h
-  main.cpp
-)
-
-# add unix signal management classes
-if (UNIX)
-  set(MAIN_SRCS ${MAIN_SRCS}
-    SignalManager.h
-    SignalManager.cpp
-  )
-endif()
+set(MAIN_SRCS main.cpp)
 
 source_group("Source Files" FILES ${MAIN_SRCS})
 set(SOURCES ${MAIN_SRCS} ${ALL_SRCS})
@@ -84,12 +74,10 @@ add_custom_command(OUTPUT resources.qrc
           ${CMAKE_CURRENT_BINARY_DIR}/resources.qrc
           /=${CMAKE_SOURCE_DIR}/resources/
           ui/webview.qml=${CMAKE_SOURCE_DIR}/src/ui/webview.qml
-          ui/errormessage.qml=${CMAKE_SOURCE_DIR}/src/ui/errormessage.qml
   COMMENT "Creating resources.qrc"
   DEPENDS ${CMAKE_SOURCE_DIR}/scripts/build-qt-resources.py
     ${RESOURCE_FILES}
     ${CMAKE_SOURCE_DIR}/src/ui/webview.qml
-    ${CMAKE_SOURCE_DIR}/src/ui/errormessage.qml
 )
 set_source_files_properties(resources.qrc PROPERTIES GENERATED TRUE)
 add_custom_command(OUTPUT qrc_resources.cpp
@@ -98,21 +86,7 @@ add_custom_command(OUTPUT qrc_resources.cpp
 )
 set_source_files_properties(qrc_resources.cpp PROPERTIES GENERATED TRUE)
 
-# handle Web-Client resource
-include(WebClientResources)
-
-set_source_files_properties(${PROJECT_SOURCE_DIR}/bundle/osx/Plex.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-list(APPEND RESOURCE_FILES qrc_resources.cpp ${WEB_CLIENT_CPP})
-
-if(APPLE)
-  list(APPEND RESOURCE_FILES ${PROJECT_SOURCE_DIR}/bundle/osx/Plex.icns)
-  if(HAVE_UPDATER)
-    list(APPEND RESOURCE_FILES ${UPDATER_PATH})
-    set_source_files_properties(${UPDATER_PATH} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-  endif(HAVE_UPDATER)
-
-  set(PLISTPARSER plistparser)
-endif()
+list(APPEND RESOURCE_FILES qrc_resources.cpp)
 
 set(MACOSX_BUNDLE_ICON_FILE Plex.icns)
 set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STRING})
@@ -120,29 +94,52 @@ set(MACOSX_BUNDLE_BUNDLE_NAME "Plex Media Player")
 set(MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STRING})
 set(MACOSX_BUNDLE_GUI_IDENTIFIER tv.plex.player)
 
+if(APPLE)
+  if(HAVE_UPDATER)
+    add_resources(TARGET ${MAIN_TARGET} SOURCES ${UPDATER_PATH} DEST ${INSTALL_RESOURCE_DIR})
+  endif(HAVE_UPDATER)
+
+  set_source_files_properties(
+    input/apple/HIDRemote/HIDRemote.m
+    PROPERTIES COMPILE_FLAGS -fno-objc-arc
+  )
+
+  # copy the qt.conf so that when running PMP from a debugger it finds the plugins and QML files
+  if(EXISTS ${QTROOT}/bin/qt.conf)
+    add_resources(TARGET ${MAIN_TARGET} SOURCES ${QTROOT}/bin/qt.conf DEST ${INSTALL_RESOURCE_DIR})
+  endif()
+
+  set(PLISTPARSER plistparser)
+
+  set(ICON_FILE ${CMAKE_SOURCE_DIR}/bundle/osx/${MACOSX_BUNDLE_ICON_FILE})
+  list(APPEND RESOURCE_FILES ${ICON_FILE})
+  set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+endif()
+
 if(WIN32)
   list(APPEND RESOURCE_FILES ${CMAKE_SOURCE_DIR}/bundle/win/iconres.rc)
 endif()
 
+set(RESOURCE_ROOT .)
+if(APPLE)
+  set(RESOURCE_ROOT Resources)
+endif()
+
+add_resources(TARGET ${MAIN_TARGET} SOURCES ${WEB_CLIENT_DIR} DEST ${RESOURCE_ROOT}/web-client-${WEB_CLIENT_VERSTR})
+if(NOT APPLE)
+  install(DIRECTORY ${WEB_CLIENT_DIR} DESTINATION ${INSTALL_RESOURCE_DIR})
+endif()
+
 get_property(BUNDLED_FILES GLOBAL PROPERTY CONFIG_BUNDLED_FILES)
 add_executable(${MAIN_TARGET} WIN32 MACOSX_BUNDLE ${SOURCES} ${BUNDLED_FILES} ${RESOURCE_FILES})
-
+std_target_properties(${MAIN_TARGET})
 set_target_properties(${MAIN_TARGET} PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/bundle/osx/Info.plist.in
   INSTALL_RPATH "${QTROOT}/lib"
   OUTPUT_NAME ${MAIN_NAME}
-  CXX_STANDARD 11
-  CXX_STANDARD_REQUIRED TRUE
 )
-
-# copy the qt.conf so that when running PMP from a debugger it finds the plugins and QML files
-if(APPLE)
-  add_custom_command(
-    TARGET ${MAIN_TARGET} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${QTROOT}/bin/qt.conf $<TARGET_FILE_DIR:${MAIN_TARGET}>/../Resources
-    COMMENT "Copy qt.conf to main bundle"
-  )
-endif(APPLE)
+copy_resources(${MAIN_TARGET})
+clang_tidy(${MAIN_TARGET})
 
 target_link_libraries(${MAIN_TARGET}
   shared

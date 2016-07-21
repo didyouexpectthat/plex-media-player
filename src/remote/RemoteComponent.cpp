@@ -12,7 +12,7 @@
 #include "utils/Utils.h"
 #include "Version.h"
 
-static QMap<QString, QString> resourceKeyMap = {
+static QMap<QString, QString> g_resourceKeyMap = {
   { "Name", "title" },
   { "Resource-Identifier", "machineIdentifier" },
   { "Product", "product" },
@@ -22,7 +22,7 @@ static QMap<QString, QString> resourceKeyMap = {
   { "Device-Class", "deviceClass" }
 };
 
-static QMap<QString, QString> headerKeyMap = {
+static QMap<QString, QString> g_headerKeyMap = {
   { "Name", "X-Plex-Device-Name" },
   { "Resource-Identifier", "X-Plex-Client-Identifier" },
   { "Product", "X-Plex-Product" },
@@ -58,10 +58,10 @@ QVariantMap RemoteComponent::HeaderInformation()
   QVariantMap gdmInfo = GDMInformation();
   QVariantMap headerInfo;
 
-  foreach (const QString& key, gdmInfo.keys())
+  for(const QString& key : gdmInfo.keys())
   {
-    if (headerKeyMap.contains(key))
-      headerInfo[headerKeyMap[key]] = gdmInfo[key];
+    if (g_headerKeyMap.contains(key))
+      headerInfo[g_headerKeyMap[key]] = gdmInfo[key];
   }
 
   headerInfo["X-Plex-Platform"] = QSysInfo::productType();
@@ -76,10 +76,10 @@ QVariantMap RemoteComponent::ResourceInformation()
   QVariantMap gdmInfo = GDMInformation();
   QVariantMap resourceInfo;
 
-  foreach (const QString& key, gdmInfo.keys())
+  for(const QString& key : gdmInfo.keys())
   {
-    if (resourceKeyMap.contains(key))
-      resourceInfo[resourceKeyMap[key]] = gdmInfo[key];
+    if (g_resourceKeyMap.contains(key))
+      resourceInfo[g_resourceKeyMap[key]] = gdmInfo[key];
   }
 
   resourceInfo["platform"] = QSysInfo::productType();
@@ -120,7 +120,7 @@ void RemoteComponent::handleResource(QHttpRequest* request, QHttpResponse* respo
     output.writeStartElement("MediaContainer");
     output.writeStartElement("Player");
 
-    foreach (const QString& key, headers.keys())
+    for(const QString& key : headers.keys())
       output.writeAttribute(key, headers[key].toString());
 
     output.writeEndElement();
@@ -143,9 +143,7 @@ QVariantMap RemoteComponent::QueryToMap(const QUrl& url)
   QUrlQuery query(url);
   QVariantMap queryMap;
 
-  QPair<QString, QString> stringPair;
-
-  foreach (stringPair, query.queryItems())
+  for(auto stringPair : query.queryItems())
   {
     QString key = stringPair.first;
     QString value = stringPair.second;
@@ -170,7 +168,7 @@ QVariantMap RemoteComponent::QueryToMap(const QUrl& url)
 QVariantMap RemoteComponent::HeaderToMap(const qhttp::THeaderHash& hash)
 {
   QVariantMap variantMap;
-  foreach (const QString& key, hash.keys())
+  for(const QString& key : hash.keys())
     variantMap.insert(key, hash.value(key.toUtf8()));
   return variantMap;
 }
@@ -221,8 +219,13 @@ void RemoteComponent::handleCommand(QHttpRequest* request, QHttpResponse* respon
   }
   else if ((request->url().path() == "/player/timeline/poll"))
   {
-    if (m_subscriberMap.contains(identifier) == false)
+    QMutexLocker lk(&m_subscriberLock);
+    if (!m_subscriberMap.contains(identifier))
+    {
+      lk.unlock();
       handleSubscription(request, response, true);
+      lk.relock();
+    }
 
     RemotePollSubscriber *subscriber = (RemotePollSubscriber *)m_subscriberMap[identifier];
     if (subscriber)
@@ -243,7 +246,7 @@ void RemoteComponent::handleCommand(QHttpRequest* request, QHttpResponse* respon
 
 
   // handle commandID
-  if (headerMap.contains("x-plex-client-identifier") == false || queryMap.contains("commandID") == false)
+  if (!headerMap.contains("x-plex-client-identifier") || !queryMap.contains("commandID"))
   {
     QLOG_WARN() << "Can't find a X-Plex-Client-Identifier header";
     response->setStatusCode(qhttp::ESTATUS_NOT_ACCEPTABLE);
@@ -262,7 +265,7 @@ void RemoteComponent::handleCommand(QHttpRequest* request, QHttpResponse* respon
 
   {
     QMutexLocker lk(&m_subscriberLock);
-    if (m_subscriberMap.contains(identifier) == false)
+    if (!m_subscriberMap.contains(identifier))
     {
       QLOG_WARN() << "Failed to lock up subscriber" << identifier;
       response->setStatusCode(qhttp::ESTATUS_NOT_ACCEPTABLE);
@@ -293,17 +296,19 @@ void RemoteComponent::responseDone()
   {
     QMutexLocker lk(&m_responseLock);
 
-    int foundId = -1;
-    foreach(int responseId, m_responseMap.keys())
+    bool found = false;
+    quint64 foundId = 0;
+    for(auto responseId : m_responseMap.keys())
     {
       if (m_responseMap[responseId] == response)
       {
         foundId = responseId;
+        found = true;
         break;
       }
     }
 
-    if (foundId != -1)
+    if (found)
       m_responseMap.remove(foundId);
   }
 }
@@ -312,8 +317,8 @@ void RemoteComponent::responseDone()
 void RemoteComponent::commandResponse(const QVariantMap& responseArguments)
 {
   // check for minimum requirements in the responseArguments
-  if (responseArguments.contains("commandID") == false ||
-      responseArguments.contains("responseCode") == false)
+  if (!responseArguments.contains("commandID") ||
+      !responseArguments.contains("responseCode"))
   {
     QLOG_WARN() << "responseArguments did not contain a commandId or responseCode";
     return;
@@ -323,7 +328,7 @@ void RemoteComponent::commandResponse(const QVariantMap& responseArguments)
   uint responseCode = responseArguments["responseCode"].toUInt();
 
   QMutexLocker lk(&m_responseLock);
-  if (m_responseMap.contains(commandId) == false)
+  if (!m_responseMap.contains(commandId))
   {
     QLOG_WARN() << "Could not find responseId:" << commandId << " - maybe it was removed because of a timeout?";
     return;
@@ -338,7 +343,7 @@ void RemoteComponent::commandResponse(const QVariantMap& responseArguments)
   if (responseArguments.contains("headers") && responseArguments["headers"].type() == QVariant::Map)
   {
     QVariantMap headers = responseArguments["headers"].toMap();
-      foreach (const QString& key, headers.keys())
+      for(const QString& key : headers.keys())
         response->addHeader(key.toUtf8(), headers[key].toByteArray());
   }
 
@@ -358,8 +363,8 @@ void RemoteComponent::handleSubscription(QHttpRequest* request, QHttpResponse* r
   QVariantMap headers = HeaderToMap(request->headers());
 
   // check for required headers
-  if (headers.contains("x-plex-client-identifier") == false ||
-      headers.contains("x-plex-device-name") == false)
+  if (!headers.contains("x-plex-client-identifier") ||
+      !headers.contains("x-plex-device-name"))
   {
     QLOG_ERROR() << "Missing X-Plex headers in /timeline/subscribe request";
     response->setStatusCode(qhttp::ESTATUS_BAD_REQUEST);
@@ -370,7 +375,7 @@ void RemoteComponent::handleSubscription(QHttpRequest* request, QHttpResponse* r
   // check for required arguments
   QVariantMap query = QueryToMap(request->url());
 
-  if (query.contains("commandID") == false || ((query.contains("port") == false) && !poll))
+  if (!query.contains("commandID") || ((!query.contains("port")) && !poll))
   {
     QLOG_ERROR() << "Missing arguments to /timeline/subscribe request";
     response->setStatusCode(qhttp::ESTATUS_BAD_REQUEST);
@@ -381,7 +386,7 @@ void RemoteComponent::handleSubscription(QHttpRequest* request, QHttpResponse* r
   QString clientIdentifier(request->headers()["x-plex-client-identifier"]);
 
   QMutexLocker lk(&m_subscriberLock);
-  RemoteSubscriber* subscriber = 0;
+  RemoteSubscriber* subscriber = nullptr;
 
   if (m_subscriberMap.contains(clientIdentifier))
   {
@@ -448,7 +453,7 @@ void RemoteComponent::checkSubscribers()
 {
   QMutexLocker lk(&m_subscriberLock);
   QList<RemoteSubscriber*> subsToRemove;
-  foreach(RemoteSubscriber* subscriber, m_subscriberMap.values())
+  for(RemoteSubscriber* subscriber : m_subscriberMap.values())
   {
     // was it more than 10 seconds since this client checked in last?
     if (subscriber->lastSubscribe() > 90 * 1000)
@@ -460,7 +465,7 @@ void RemoteComponent::checkSubscribers()
 
   lk.unlock();
 
-  foreach(RemoteSubscriber* sub, subsToRemove)
+  for(RemoteSubscriber* sub : subsToRemove)
     subscriberRemove(sub->clientIdentifier());
 }
 
@@ -482,7 +487,7 @@ void RemoteComponent::timelineFinished(QNetworkReply* reply)
     return;
 
   QMutexLocker lk(&m_subscriberLock);
-  if (m_subscriberMap.contains(identifier) == false)
+  if (!m_subscriberMap.contains(identifier))
   {
     QLOG_WARN() << "Got a networkreply with a identifier we don't know about:" << identifier;
     return;
@@ -498,7 +503,7 @@ void RemoteComponent::timelineFinished(QNetworkReply* reply)
 void RemoteComponent::subscriberRemove(const QString& identifier)
 {
   QMutexLocker lk(&m_subscriberLock);
-  if (m_subscriberMap.contains(identifier) == false)
+  if (!m_subscriberMap.contains(identifier))
   {
     QLOG_ERROR() << "Can't remove client:" << identifier << "since we don't know about it.";
     return;
@@ -522,7 +527,7 @@ void RemoteComponent::timelineUpdate(quint64 commandID, const QString& timeline)
 {
   QMutexLocker lk(&m_subscriberLock);
 
-  foreach (RemoteSubscriber* subscriber, m_subscriberMap.values())
+  for(RemoteSubscriber* subscriber : m_subscriberMap.values())
   {
     subscriber->queueTimeline(commandID, timeline.toUtf8());
     subscriber->sendUpdate();

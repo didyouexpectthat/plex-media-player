@@ -12,7 +12,7 @@
 #include "utils/Utils.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-InputMapping::InputMapping(QObject *parent) : QObject(parent)
+InputMapping::InputMapping(QObject *parent) : QObject(parent), m_sourceMatcher(false)
 {
   m_watcher = new QFileSystemWatcher(this);
   connect(m_watcher, &QFileSystemWatcher::directoryChanged, this, &InputMapping::dirChange);
@@ -52,23 +52,19 @@ bool InputMapping::loadMappings()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-QString InputMapping::mapToAction(const QString& source, const QString& keycode)
+QVariantList InputMapping::mapToAction(const QString& source, const QString& keycode)
 {
   // if the source is direct we will just use the keycode as the action
   if (source == "direct")
-    return keycode;
+    return { QVariant(keycode) };
+
+  QVariantList strActions;
 
   // first we need to match the source
-  QVariant sourceName = m_sourceMatcher.match(source);
-  if (sourceName.isValid())
-  {
-    QVariant action = m_inputMatcher.value(sourceName.toString())->match(keycode);
-    if (action.isValid())
-    {
-      return action.toString();
-    }
-  }
-  return QString();
+  for (auto src : m_sourceMatcher.match(source))
+    strActions << m_inputMatcher.value(src.toString())->match(keycode);
+
+  return strActions;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -146,8 +142,8 @@ bool InputMapping::loadMappingDirectory(const QString& path, bool copy)
         {
           // get the input map and add it to a new CachedMatcher
           QVariantMap inputMap = mapping.second.value("mapping").toMap();
-          CachedRegexMatcher* inputMatcher = new CachedRegexMatcher(this);
-          foreach(const QString& pattern, inputMap.keys())
+          auto inputMatcher = new CachedRegexMatcher(true, this);
+          for(const QString& pattern : inputMap.keys())
             inputMatcher->addMatcher("^" + pattern + "$", inputMap.value(pattern));
 
           m_inputMatcher.insert(mapping.first, inputMatcher);

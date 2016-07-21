@@ -3,10 +3,12 @@
 #include <Qt>
 #include <QDir>
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include "display/DisplayComponent.h"
 #include "settings/SettingsComponent.h"
 #include "system/SystemComponent.h"
 #include "utils/Utils.h"
+#include "utils/Log.h"
 #include "ComponentManager.h"
 #include "settings/SettingsSection.h"
 
@@ -34,9 +36,12 @@ static void wakeup_cb(void *context)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 PlayerComponent::PlayerComponent(QObject* parent)
-  : ComponentBase(parent), m_lastPositionUpdate(0.0), m_playbackAudioDelay(0), m_playbackStartSent(false), m_window(0), m_mediaFrameRate(0),
+  : ComponentBase(parent), m_state(State::stopped), m_paused(false), m_playbackActive(false),
+  m_inPlayback(false), m_bufferingPercentage(100), m_lastBufferingPercentage(-1),
+  m_lastPositionUpdate(0.0), m_playbackAudioDelay(0),
+  m_playbackStartSent(false), m_window(nullptr), m_mediaFrameRate(0),
   m_restoreDisplayTimer(this), m_reloadAudioTimer(this),
-  m_streamSwitchImminent(false)
+  m_streamSwitchImminent(false), m_doAc3Transcoding(false)
 {
   qmlRegisterType<PlayerQuickItem>("Konvergo", 1, 0, "MpvVideo"); // deprecated name
   qmlRegisterType<PlayerQuickItem>("Konvergo", 1, 0, "KonvergoVideo");
@@ -60,7 +65,7 @@ void PlayerComponent::componentPostInitialize()
 PlayerComponent::~PlayerComponent()
 {
   if (m_mpv)
-    mpv_set_wakeup_callback(m_mpv, NULL, NULL);
+    mpv_set_wakeup_callback(m_mpv, nullptr, nullptr);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -117,6 +122,9 @@ bool PlayerComponent::componentInitialize()
   mpv::qt::set_option_variant(m_mpv, "demuxer-max-bytes", 50 * 1024 * 1024); // bytes
   // Specifically for enabling mpeg4.
   mpv::qt::set_option_variant(m_mpv, "hwdec-codecs", "all");
+  // Do not use exact seeks by default. (This affects the start position in the "loadfile"
+  // command in particular. We override the seek mode for normal "seek" commands.)
+  mpv::qt::set_option_variant(m_mpv, "hr-seek", "no");
 #endif
 
   mpv_observe_property(m_mpv, 0, "pause", MPV_FORMAT_FLAG);
@@ -139,6 +147,10 @@ bool PlayerComponent::componentInitialize()
   // (See handler in handleMpvEvent() for details.)
   mpv::qt::command_variant(m_mpv, QStringList() << "hook-add" << "on_load" << "1" << "0");
 
+  // Setup a hook with the ID 1, which is run at a certain stage during loading.
+  // We use it to probe the codecs.
+  mpv::qt::command_variant(m_mpv, QStringList() << "hook-add" << "on_preloaded" << "2" << "0");
+
   updateAudioDeviceList();
   setAudioConfiguration();
   updateSubtitleSettings();
@@ -154,6 +166,21 @@ bool PlayerComponent::componentInitialize()
           this, &PlayerComponent::setAudioConfiguration);
 
   initializeCodecSupport();
+  Codecs::probeCodecs();
+
+  QString codecInfo;
+  for (auto codec : Codecs::getCachedCodecList())
+  {
+    if (codec.present)
+    {
+      if (codecInfo.size())
+        codecInfo += " ";
+      codecInfo += codec.driver;
+      if (codec.type == CodecType::Encoder)
+        codecInfo += "(enc)";
+    }
+  }
+  QLOG_INFO() << "Present codecs:" << qPrintable(codecInfo);
 
   return true;
 }
@@ -181,19 +208,19 @@ void PlayerComponent::setRpiWindow(QQuickWindow* window)
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::setWindow(QQuickWindow* window)
 {
-  bool use_rpi = false;
+  bool useRpi = false;
 #ifdef TARGET_RPI
-  use_rpi = true;
+  useRpi = true;
 #endif
 
   m_window = window;
   if (!window)
     return;
 
-  QString force_vo = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "debug.force_vo").toString();
-  if (force_vo.size())
-    mpv::qt::set_option_variant(m_mpv, "vo", force_vo);
-  else if (use_rpi)
+  QString forceVo = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "debug.force_vo").toString();
+  if (forceVo.size())
+    mpv::qt::set_option_variant(m_mpv, "vo", forceVo);
+  else if (useRpi)
     setRpiWindow(window);
   else
     setQtQuickWindow(window);
@@ -211,6 +238,7 @@ bool PlayerComponent::load(const QString& url, const QVariantMap& options, const
 void PlayerComponent::queueMedia(const QString& url, const QVariantMap& options, const QVariantMap &metadata, const QString& audioStream, const QString& subtitleStream)
 {
   m_mediaFrameRate = metadata["frameRate"].toFloat(); // returns 0 on failure
+  m_serverMediaInfo = metadata["media"].toMap();
 
   updateVideoSettings();
 
@@ -224,19 +252,23 @@ void PlayerComponent::queueMedia(const QString& url, const QVariantMap& options,
   if (startMilliseconds != 0)
     extraArgs.insert("start", "+" + QString::number(startMilliseconds / 1000.0));
 
+  // force default audio selection
+  extraArgs.insert("ff-aid", "auto");
+
+  // by default ignore all subtitles, unless overridden
+  extraArgs.insert("sid", "no");
+  extraArgs.insert("ff-sid", "auto");
+
   // detect subtitles
   if (!subtitleStream.isEmpty())
   {
     // If the stream title starts with a #, then it's an index
     if (subtitleStream.startsWith("#"))
       extraArgs.insert("ff-sid", subtitleStream.mid(1));
-    else
+    else {
       extraArgs.insert("sub-file", subtitleStream);
-  }
-  else
-  {
-    // no subtitles, tell mpv to ignore them.
-    extraArgs.insert("sid", "no");
+      extraArgs.insert("sid", "auto"); // select the external one by default
+    }
   }
 
   if (metadata["type"] == "music")
@@ -247,6 +279,14 @@ void PlayerComponent::queueMedia(const QString& url, const QVariantMap& options,
     extraArgs.insert("ff-aid", audioStream);
 
   extraArgs.insert("pause", options["autoplay"].toBool() ? "no" : "yes");
+
+  QString userAgent = metadata["headers"].toMap()["User-Agent"].toString();
+  if (userAgent.size())
+    extraArgs.insert("user-agent", userAgent);
+
+  // Make sure the list of requested codecs is reset.
+  extraArgs.insert("ad", "");
+  extraArgs.insert("vd", "");
 
   command << extraArgs;
 
@@ -319,55 +359,105 @@ void PlayerComponent::onRefreshRateChange()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::updatePlaybackState()
+{
+  State newState = m_state;
+
+  if (m_inPlayback) {
+    if (m_paused)
+    {
+      newState = State::paused;
+    }
+    else if (m_playbackActive)
+    {
+      newState = State::playing;
+    }
+    else
+    {
+      // Playback not active, but also not buffering means we're in some "other"
+      // waiting state. Pretend to web-client that we're buffering.
+      if (m_bufferingPercentage == 100)
+        m_bufferingPercentage = 0;
+      newState = State::buffering;
+    }
+  }
+  else
+  {
+    if (newState != State::error)
+      newState = State::stopped;
+  }
+
+  if (newState != m_state)
+  {
+    switch (newState) {
+    case State::paused:
+      QLOG_INFO() << "Entering state: paused";
+      emit paused();
+      break;
+    case State::playing:
+      QLOG_INFO() << "Entering state: playing";
+      emit playing();
+      break;
+    case State::stopped:
+      QLOG_INFO() << "Entering state: stopped";
+      emit stopped();
+      break;
+    case State::buffering:
+      QLOG_INFO() << "Entering state: buffering";
+      m_lastBufferingPercentage = -1; /* force update below */
+      break;
+    case State::error:
+      /* handled separately */
+      break;
+    }
+    m_state = newState;
+  }
+
+  if (m_state == State::buffering && m_lastBufferingPercentage != m_bufferingPercentage)
+    emit buffering(m_bufferingPercentage);
+  m_lastBufferingPercentage = m_bufferingPercentage;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::handleMpvEvent(mpv_event *event)
 {
   switch (event->event_id)
   {
     case MPV_EVENT_START_FILE:
     {
-      m_CurrentUrl = mpv::qt::get_property_variant(m_mpv, "path").toString();
       m_playbackStartSent = false;
-      break;
-    }
-    case MPV_EVENT_FILE_LOADED:
-    {
-      emit playing(m_CurrentUrl);
+      m_inPlayback = true;
       break;
     }
     case MPV_EVENT_END_FILE:
     {
-      mpv_event_end_file *end_file = (mpv_event_end_file *)event->data;
-      switch (end_file->reason)
+      mpv_event_end_file *endFile = (mpv_event_end_file *)event->data;
+      if (endFile->reason == MPV_END_FILE_REASON_ERROR)
       {
-        case MPV_END_FILE_REASON_EOF:
-          emit finished(m_CurrentUrl);
-          break;
-        case MPV_END_FILE_REASON_ERROR:
-          emit error(end_file->error, mpv_error_string(end_file->error));
-          break;
-        default:
-          emit stopped(m_CurrentUrl);
-          break;
+        QLOG_INFO() << "Entering state: error";
+        m_state = State::error;
+        emit error(mpv_error_string(endFile->error));
       }
 
-      emit playbackEnded(m_CurrentUrl);
-      m_CurrentUrl = "";
+      m_inPlayback = false;
 
       if (!m_streamSwitchImminent)
         m_restoreDisplayTimer.start(0);
       m_streamSwitchImminent = false;
       break;
     }
-    case MPV_EVENT_IDLE:
-    {
-      emit playbackAllDone();
-      break;
-    }
     case MPV_EVENT_PLAYBACK_RESTART:
     {
-      // it's also sent after seeks are completed
-      if (!m_playbackStartSent)
-        emit playbackStarting();
+#if defined(Q_OS_MAC)
+      // On OSX, initializing VideoTooolbox (hardware decoder API) will mysteriously
+      // show the hidden mouse pointer again. The VTDecompressionSessionCreate API
+      // function does this, and we have no influence over its behavior. To make sure
+      // the cursor is gone again when starting playback, listen to the player's
+      // playbackStarting signal, at which point decoder initialization is guaranteed
+      // to be completed. Then we just have to set the cursor again on the Cocoa level.
+      if (!m_playbackStartSent && QGuiApplication::overrideCursor())
+        QGuiApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
+#endif
       m_playbackStartSent = true;
       break;
     }
@@ -376,22 +466,21 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       mpv_event_property *prop = (mpv_event_property *)event->data;
       if (strcmp(prop->name, "pause") == 0 && prop->format == MPV_FORMAT_FLAG)
       {
-        int state = *(int *)prop->data;
-        emit paused(state);
+        m_paused = !!*(int *)prop->data;
       }
       else if (strcmp(prop->name, "core-idle") == 0 && prop->format == MPV_FORMAT_FLAG)
       {
-        emit playbackActive(!*(int *)prop->data);
+        m_playbackActive = !*(int *)prop->data;
+        emit playbackActive(m_playbackActive);
       }
-      else if (strcmp(prop->name, "cache-buffering-state") == 0 && prop->format == MPV_FORMAT_INT64)
+      else if (strcmp(prop->name, "cache-buffering-state") == 0)
       {
-        int64_t percentage = *(int64_t *)prop->data;
-        emit buffering(percentage);
+        m_bufferingPercentage = prop->format == MPV_FORMAT_INT64 ? *(int64_t *)prop->data : 100;
       }
       else if (strcmp(prop->name, "playback-time") == 0 && prop->format == MPV_FORMAT_DOUBLE)
       {
         double pos = *(double*)prop->data;
-        if (fabs(pos - m_lastPositionUpdate) > 0.25)
+        if (fabs(pos - m_lastPositionUpdate) > 0.015)
         {
           quint64 ms = (quint64)(qMax(pos * 1000.0, 0.0));
           emit positionUpdate(ms);
@@ -421,7 +510,7 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       size_t len = strlen(msg->text);
       if (len > 0 && msg->text[len - 1] == '\n')
         len -= 1;
-      QString logline = QString::fromUtf8(msg->prefix) + ": " + QString::fromUtf8(msg->text, len);
+      QString logline = QString::fromUtf8(msg->prefix) + ": " + QString::fromUtf8(msg->text, (int)len);
       if (msg->log_level >= MPV_LOG_LEVEL_V)
         QLOG_DEBUG() << qPrintable(logline);
       else if (msg->log_level >= MPV_LOG_LEVEL_INFO)
@@ -435,15 +524,21 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
     case MPV_EVENT_CLIENT_MESSAGE:
     {
       mpv_event_client_message *msg = (mpv_event_client_message *)event->data;
+      if (msg->num_args < 3 || strcmp(msg->args[0], "hook_run") != 0)
+        break;
+      QString resumeId = QString::fromUtf8(msg->args[2]);
+      // Start "on_load" hook.
       // This happens when the player is about to load the file, but no actual loading has taken part yet.
       // We use this to block loading until we explicitly tell it to continue.
-      if (msg->num_args >= 3 && !strcmp(msg->args[0], "hook_run") && !strcmp(msg->args[1], "1"))
+      if (!strcmp(msg->args[1], "1"))
       {
-        QString resume_id = QString::fromUtf8(msg->args[2]);
         // Calling this lambda will instruct mpv to continue loading the file.
         auto resume = [=] {
-          QLOG_INFO() << "resuming loading";
-          mpv::qt::command_variant(m_mpv, QStringList() << "hook-ack" << resume_id);
+          QLOG_INFO() << "checking codecs";
+          startCodecsLoading([=] {
+            QLOG_INFO() << "resuming loading";
+            mpv::qt::command_variant(m_mpv, QStringList() << "hook-ack" << resumeId);
+          });
         };
         if (switchDisplayFrameRate())
         {
@@ -461,6 +556,16 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
         }
         break;
       }
+      // Start "on_preload" hook.
+      // Used to probe codecs.
+      if (!strcmp(msg->args[1], "2"))
+      {
+        startCodecsLoading([=] {
+          mpv::qt::command_variant(m_mpv, QStringList() << "hook-ack" << resumeId);
+        });
+        break;
+      }
+      break;
     }
     default:; /* ignore */
   }
@@ -477,6 +582,8 @@ void PlayerComponent::handleMpvEvents()
       break;
     handleMpvEvent(event);
   }
+  // Once we got all status updates, determine the new canonical state.
+  updatePlaybackState();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -521,9 +628,8 @@ void PlayerComponent::pause()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::seekTo(qint64 ms)
 {
-  double start = mpv::qt::get_property_variant(m_mpv, "time-start").toDouble();
-  QString timeStr = QString::number(ms / 1000.0 + start);
-  QStringList args = (QStringList() << "seek" << timeStr << "absolute");
+  double timeSecs = ms / 1000.0;
+  QVariantList args = (QVariantList() << "seek" << timeSecs << "absolute+exact");
   mpv::qt::command_variant(m_mpv, args);
 }
 
@@ -584,7 +690,7 @@ void PlayerComponent::setSubtitleStream(const QString &subtitleStream)
   }
   else
   {
-    QStringList args = (QStringList() << "sub_add" << subtitleStream << "cached");
+    QStringList args = (QStringList() << "sub-add" << subtitleStream << "cached");
     mpv::qt::command_variant(m_mpv, args);
   }
 }
@@ -603,13 +709,13 @@ void PlayerComponent::setAudioDelay(qint64 milliseconds)
 {
   m_playbackAudioDelay = milliseconds;
 
-  double display_fps = DisplayComponent::Get().currentRefreshRate();
-  const char *audio_delay_setting = "audio_delay.normal";
-  if (fabs(display_fps - 24) < 1) // cover 24Hz, 23.976Hz, and values very close
-    audio_delay_setting = "audio_delay.24hz";
+  double displayFps = DisplayComponent::Get().currentRefreshRate();
+  const char *audioDelaySetting = "audio_delay.normal";
+  if (fabs(displayFps - 24) < 1) // cover 24Hz, 23.976Hz, and values very close
+    audioDelaySetting = "audio_delay.24hz";
 
-  double fixed_delay = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, audio_delay_setting).toFloat();
-  mpv::qt::set_option_variant(m_mpv, "audio-delay", (fixed_delay + m_playbackAudioDelay) / 1000.0);
+  double fixedDelay = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, audioDelaySetting).toFloat();
+  mpv::qt::set_option_variant(m_mpv, "audio-delay", (fixedDelay + m_playbackAudioDelay) / 1000.0);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -621,7 +727,7 @@ void PlayerComponent::setSubtitleDelay(qint64 milliseconds)
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::onReloadAudio()
 {
-  mpv::qt::command_variant(m_mpv, QStringList() << "ao_reload");
+  mpv::qt::command_variant(m_mpv, QStringList() << "ao-reload");
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -631,18 +737,18 @@ void PlayerComponent::onReloadAudio()
 // force the player and/or the OS to move audio output back to the user-selected device.
 void PlayerComponent::checkCurrentAudioDevice(const QSet<QString>& old_devs, const QSet<QString>& new_devs)
 {
-  QString user_device = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "device").toString();
+  QString userDevice = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "device").toString();
 
   QSet<QString> removed = old_devs - new_devs;
   QSet<QString> added = new_devs - old_devs;
 
   QLOG_DEBUG() << "Audio devices removed:" << removed;
   QLOG_DEBUG() << "Audio devices added:" << added;
-  QLOG_DEBUG() << "Audio device selected:" << user_device;
+  QLOG_DEBUG() << "Audio device selected:" << userDevice;
 
-  if (!mpv::qt::get_property_variant(m_mpv, "idle").toBool() && user_device.length())
+  if (!mpv::qt::get_property_variant(m_mpv, "idle").toBool() && userDevice.length())
   {
-    if (added.contains(user_device))
+    if (added.contains(userDevice))
     {
       // The timer is for debouncing the reload. Several change notifications could
       // come in quick succession. Also, it's possible that trying to open the
@@ -658,7 +764,7 @@ void PlayerComponent::updateAudioDeviceList()
   QVariantList settingList;
   QVariant list = getAudioDeviceList();
   QSet<QString> devices;
-  foreach (const QVariant& d, list.toList())
+  for(const QVariant& d : list.toList())
   {
     Q_ASSERT(d.type() == QVariant::Map);
     QVariantMap dmap = d.toMap();
@@ -681,17 +787,17 @@ void PlayerComponent::updateAudioDeviceList()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::setAudioConfiguration()
 {
-  QStringList ao_defaults;
+  QStringList aoDefaults;
 
   QString deviceType = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "devicetype").toString();
 
   if (SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "exclusive").toBool())
   {
-    ao_defaults << "wasapi:exclusive=yes";
-    ao_defaults << "coreaudio:exclusive=yes";
+    aoDefaults << "wasapi:exclusive=yes";
+    aoDefaults << "coreaudio:exclusive=yes";
   }
 
-  mpv::qt::set_option_variant(m_mpv, "ao-defaults", ao_defaults.join(','));
+  mpv::qt::set_option_variant(m_mpv, "ao-defaults", aoDefaults.join(','));
 
   // set the audio device
   QVariant device = SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "device");
@@ -706,11 +812,11 @@ void PlayerComponent::setAudioConfiguration()
 
   mpv::qt::set_option_variant(m_mpv, "af-defaults", "lavrresample" + resampleOpts);
 
-  QString passthroughCodecs;
+  m_passthroughCodecs.clear();
+
   // passthrough doesn't make sense with basic type
   if (deviceType != AUDIO_DEVICE_TYPE_BASIC)
   {
-    QStringList enabledCodecs;
     SettingsSection* audioSection = SettingsComponent::Get().getSection(SETTINGS_SECTION_AUDIO);
 
     QStringList codecs;
@@ -719,19 +825,18 @@ void PlayerComponent::setAudioConfiguration()
     else if (deviceType == AUDIO_DEVICE_TYPE_HDMI && audioSection->value("advanced").toBool())
       codecs = AudioCodecsAll();
 
-    foreach (const QString& key, codecs)
+    for(const QString& key : codecs)
     {
       if (audioSection->value("passthrough." + key).toBool())
-        enabledCodecs << key;
+        m_passthroughCodecs << key;
     }
 
     // dts-hd includes dts, but listing dts before dts-hd may disable dts-hd.
-    if (enabledCodecs.indexOf("dts-hd") != -1)
-      enabledCodecs.removeAll("dts");
-
-    passthroughCodecs = enabledCodecs.join(",");
+    if (m_passthroughCodecs.indexOf("dts-hd") != -1)
+      m_passthroughCodecs.removeAll("dts");
   }
 
+  QString passthroughCodecs = m_passthroughCodecs.join(",");
   mpv::qt::set_option_variant(m_mpv, "audio-spdif", passthroughCodecs);
 
   // set the channel layout
@@ -749,12 +854,12 @@ void PlayerComponent::setAudioConfiguration()
   // here for now. We might need to add support for DTS transcoding
   // if we see user requests for it.
   //
-  bool doAc3Transcoding = false;
+  m_doAc3Transcoding = false;
   if (layout == "2.0" &&
       SettingsComponent::Get().value(SETTINGS_SECTION_AUDIO, "passthrough.ac3").toBool())
   {
     mpv::qt::command_variant(m_mpv, QStringList() << "af" << "add" << "@ac3:lavcac3enc");
-    doAc3Transcoding = true;
+    m_doAc3Transcoding = true;
   }
   else
   {
@@ -768,7 +873,7 @@ void PlayerComponent::setAudioConfiguration()
                                         "ac3 transcoding: %4").arg(device.toString(),
                                                                    layout.toString(),
                                                                    passthroughCodecs.isEmpty() ? "none" : passthroughCodecs,
-                                                                   doAc3Transcoding ? "yes" : "no");
+                                                                   m_doAc3Transcoding ? "yes" : "no");
   QLOG_INFO() << qPrintable(audioConfig);
 }
 
@@ -778,16 +883,16 @@ void PlayerComponent::updateSubtitleSettings()
   QVariant size = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "size");
   mpv::qt::set_option_variant(m_mpv, "sub-text-font-size", size);
 
-  QVariant colors_string = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "color");
-  auto colors = colors_string.toString().split(",");
+  QVariant colorsString = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "color");
+  auto colors = colorsString.toString().split(",");
   if (colors.length() == 2)
   {
     mpv::qt::set_option_variant(m_mpv, "sub-text-color", colors[0]);
     mpv::qt::set_option_variant(m_mpv, "sub-text-border-color", colors[1]);
   }
 
-  QVariant subpos_string = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "placement");
-  auto subpos = subpos_string.toString().split(",");
+  QVariant subposString = SettingsComponent::Get().value(SETTINGS_SECTION_SUBTITLES, "placement");
+  auto subpos = subposString.toString().split(",");
   if (subpos.length() == 2)
   {
     mpv::qt::set_option_variant(m_mpv, "sub-text-align-x", subpos[0]);
@@ -796,24 +901,84 @@ void PlayerComponent::updateSubtitleSettings()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::updateVideoAspectSettings()
+{
+  QVariant mode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "aspect").toString();
+  bool disableScaling = false;
+  bool keepAspect = true;
+  QString forceAspect = "-1";
+  double panScan = 0.0;
+  if (mode == "custom")
+  {
+    // in particular, do not restore anything - the intention is not to touch the user's mpv.conf settings, or whatever
+    return;
+  }
+  else if (mode == "zoom")
+  {
+    panScan = 1.0;
+  }
+  else if (mode == "force_4_3")
+  {
+    forceAspect = "4:3";
+  }
+  else if (mode == "force_16_9")
+  {
+    forceAspect = "16:9";
+  }
+  else if (mode == "stretch")
+  {
+    keepAspect = false;
+  }
+  else if (mode == "noscaling")
+  {
+    disableScaling = true;
+  }
+
+  mpv::qt::set_property_variant(m_mpv, "video-unscaled", disableScaling);
+  mpv::qt::set_property_variant(m_mpv, "video-aspect", forceAspect);
+  mpv::qt::set_option_variant(m_mpv, "keepaspect", keepAspect);
+  mpv::qt::set_property_variant(m_mpv, "panscan", panScan);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::updateVideoSettings()
 {
-  QVariant sync_mode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "sync_mode");
-  mpv::qt::set_option_variant(m_mpv, "video-sync", sync_mode);
-  QVariant hardware_decoding = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "hardware_decoding");
-  mpv::qt::set_property_variant(m_mpv, "hwdec", hardware_decoding.toBool() ? "auto" : "no");
+  QVariant syncMode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "sync_mode");
+  mpv::qt::set_option_variant(m_mpv, "video-sync", syncMode);
+
+  QString hardwareDecodingMode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "hardwareDecoding").toString();
+  bool hwdecEnabled = false;
+  QString hwdecVTFormat = "nv12";
+  if (hardwareDecodingMode == "enabled") {
+    hwdecEnabled = true;
+  } else if (hardwareDecodingMode == "osx_compat") {
+    hwdecEnabled = true;
+    hwdecVTFormat = "uyvy422";
+  }
+  mpv::qt::set_property_variant(m_mpv, "hwdec", hwdecEnabled ? "auto" : "no");
+  mpv::qt::set_option_variant(m_mpv, "videotoolbox-format", hwdecVTFormat);
+
   QVariant deinterlace = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "deinterlace");
   mpv::qt::set_option_variant(m_mpv, "deinterlace", deinterlace.toBool() ? "yes" : "no");
 
 #ifndef TARGET_RPI
-  double display_fps = DisplayComponent::Get().currentRefreshRate();
-  mpv::qt::set_property_variant(m_mpv, "display-fps", display_fps);
+  double displayFps = DisplayComponent::Get().currentRefreshRate();
+  mpv::qt::set_property_variant(m_mpv, "display-fps", displayFps);
 #endif
 
   setAudioDelay(m_playbackAudioDelay);
 
   QVariant cache = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "cache");
   mpv::qt::set_option_variant(m_mpv, "cache", cache.toInt() * 1024);
+
+  updateVideoAspectSettings();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::userCommand(QString command)
+{
+  QByteArray cmdUtf8 = command.toUtf8();
+  mpv_command_string(m_mpv, cmdUtf8.data());
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -844,10 +1009,184 @@ bool PlayerComponent::checkCodecSupport(const QString& codec)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
-void PlayerComponent::userCommand(QString command)
+QList<CodecDriver> convertCodecList(QVariant list, CodecType type)
 {
-  QByteArray cmd_utf8 = command.toUtf8();
-  mpv_command_string(m_mpv, cmd_utf8.data());
+  QList<CodecDriver> codecs;
+
+  foreach (const QVariant& e, list.toList())
+  {
+    QVariantMap map = e.toMap();
+
+    QString family = map["family"].toString();
+    QString codec = map["codec"].toString();
+    QString driver = map["driver"].toString();
+
+    // Only include FFmpeg codecs; exclude pseudo-codecs like spdif.
+    if (family != "lavc")
+      continue;
+
+    CodecDriver ncodec = {};
+    ncodec.type = type;
+    ncodec.format = codec;
+    ncodec.driver = driver;
+    ncodec.present = true;
+
+    codecs.append(ncodec);
+  }
+
+  return codecs;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+QList<CodecDriver> PlayerComponent::installedCodecDrivers()
+{
+  QList<CodecDriver> codecs;
+
+  codecs.append(convertCodecList(mpv::qt::get_property_variant(m_mpv, "decoder-list"), CodecType::Decoder));
+  codecs.append(convertCodecList(mpv::qt::get_property_variant(m_mpv, "encoder-list"), CodecType::Encoder));
+
+  return codecs;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+QStringList PlayerComponent::installedDecoderCodecs()
+{
+  QStringList formats;
+  bool hasPcm = false;
+
+  for (auto driver : installedCodecDrivers())
+  {
+    if (driver.type == CodecType::Decoder && checkCodecSupport(driver.format))
+    {
+      QString name = Codecs::plexNameFromFF(driver.format);
+      if (name.startsWith("pcm_") && name != "pcm_bluray" && name != "pcm_dvd")
+      {
+        if (hasPcm)
+          continue;
+        hasPcm = true;
+        name = "pcm";
+      }
+      formats.append(name);
+    }
+  }
+
+  return formats;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+PlaybackInfo PlayerComponent::getPlaybackInfo()
+{
+  PlaybackInfo info = {};
+
+  for (auto codec : m_passthroughCodecs)
+  {
+    // Normalize back to canonical codec names.
+    if (codec == "dts-hd")
+      codec = "dts";
+    info.audioPassthroughCodecs.insert(codec);
+  }
+
+  info.enableAC3Transcoding = m_doAc3Transcoding;
+
+  auto tracks = mpv::qt::get_property_variant(m_mpv, "track-list");
+  for (auto track : tracks.toList())
+  {
+    QVariantMap map = track.toMap();
+    QString type = map["type"].toString();
+
+    StreamInfo stream = {};
+    stream.isVideo = type == "video";
+    stream.isAudio = type == "audio";
+    stream.codec = map["codec"].toString();
+    stream.audioChannels = map["demux-channel-count"].toInt();
+    stream.videoResolution = QSize(map["demux-w"].toInt(), map["demux-h"].toInt());
+
+    // Get the profile from the server, because mpv can't determine it yet.
+    if (stream.isVideo)
+    {
+      int index = map["ff-index"].toInt();
+      for (auto partInfo : m_serverMediaInfo["Part"].toList())
+      {
+        for (auto streamInfo : partInfo.toMap()["Stream"].toList())
+        {
+          auto streamInfoMap = streamInfo.toMap();
+          bool ok = false;
+          if (streamInfoMap["index"].toInt(&ok) == index && ok)
+          {
+            stream.profile = streamInfoMap["profile"].toString();
+            QLOG_DEBUG() << "h264profile:" << stream.profile;
+          }
+        }
+      }
+    }
+
+    info.streams.append(stream);
+  }
+
+  // If we're in an early stage where we don't have streams yet, try to get the
+  // info from the PMS metadata.
+  if (!info.streams.size())
+  {
+    for (auto partInfo : m_serverMediaInfo["Part"].toList())
+    {
+      for (auto streamInfo : partInfo.toMap()["Stream"].toList())
+      {
+        auto streamInfoMap = streamInfo.toMap();
+
+        StreamInfo stream = {};
+        stream.isVideo = streamInfoMap["width"].isValid();
+        stream.isAudio = streamInfoMap["channels"].isValid();
+        stream.codec = Codecs::plexNameToFF(streamInfoMap["codec"].toString());
+        stream.audioChannels = streamInfoMap["channels"].toInt();
+        stream.videoResolution = QSize(streamInfoMap["width"].toInt(), streamInfoMap["height"].toInt());
+        stream.profile = streamInfoMap["profile"].toString();
+
+        info.streams.append(stream);
+      }
+    }
+  }
+
+  return info;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::setPreferredCodecs(const QList<CodecDriver>& codecs)
+{
+  QStringList items;
+  for (auto codec : codecs)
+  {
+    if (codec.type == CodecType::Decoder)
+    {
+      items << QString("lavc:") + codec.driver;
+    }
+  }
+  QString opt = items.join(",");
+  // For simplicity, we don't distinguish between audio and video. The player
+  // will ignore entries with mismatching media type.
+  mpv::qt::set_option_variant(m_mpv, "ad", opt);
+  mpv::qt::set_option_variant(m_mpv, "vd", opt);
+}
+
+// For QVariant.
+Q_DECLARE_METATYPE(std::function<void()>);
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::startCodecsLoading(std::function<void()> resume)
+{
+  auto fetcher = new CodecsFetcher();
+  fetcher->userData = QVariant::fromValue(resume);
+  connect(fetcher, &CodecsFetcher::done, this, &PlayerComponent::onCodecsLoadingDone);
+  Codecs::updateCachedCodecList();
+  QList<CodecDriver> codecs = Codecs::determineRequiredCodecs(getPlaybackInfo());
+  setPreferredCodecs(codecs);
+  fetcher->installCodecs(codecs);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+void PlayerComponent::onCodecsLoadingDone(CodecsFetcher* sender)
+{
+  sender->deleteLater();
+  sender->userData.value<std::function<void()>>()();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -858,6 +1197,7 @@ static QString get_mpv_osd(mpv_handle *ctx, const QString& property)
     return "-";
   QString r = QString::fromUtf8(s);
   mpv_free(s);
+  Log::CensorAuthTokens(r);
   return r;
 }
 
@@ -869,10 +1209,10 @@ void PlayerComponent::appendAudioFormat(QTextStream& info, const QString& proper
 {
   // Guess if it's a passthrough format. Don't show the channel layout in this
   // case, because it's confusing.
-  QString audio_format = MPV_PROPERTY(property + "/format");
-  if (audio_format.startsWith("spdif-"))
+  QString audioFormat = MPV_PROPERTY(property + "/format");
+  if (audioFormat.startsWith("spdif-"))
   {
-    info << "passthrough (" << audio_format.mid(6) << ")";
+    info << "passthrough (" << audioFormat.mid(6) << ")";
   }
   else
   {
@@ -909,28 +1249,28 @@ QString PlayerComponent::videoInformation() const
   info << "FPS (filters): " << MPV_PROPERTY("estimated-vf-fps") << endl;
   info << "Aspect: " << MPV_PROPERTY("video-aspect") << endl;
   info << "Bitrate: " << MPV_PROPERTY("video-bitrate") << endl;
-  double display_fps = DisplayComponent::Get().currentRefreshRate();
+  double displayFps = DisplayComponent::Get().currentRefreshRate();
   info << "Display FPS: " << MPV_PROPERTY("display-fps")
-                          << " (" << display_fps << ")" << endl;
-  info << "Hardware Decoding: " << MPV_PROPERTY("hwdec-active")
-                                << " (" << MPV_PROPERTY("hwdec-detected") << ")" << endl;
+                          << " (" << displayFps << ")" << endl;
+  info << "Hardware Decoding: " << MPV_PROPERTY("hwdec-current")
+                                << " (" << MPV_PROPERTY("hwdec-interop") << ")" << endl;
   info << endl;
   info << "Audio: " << endl;
   info << "Codec: " << MPV_PROPERTY("audio-codec") << endl;
   info << "Bitrate: " << MPV_PROPERTY("audio-bitrate") << endl;
-  info << "Channels (input): ";
+  info << "Channels: ";
   appendAudioFormat(info, "audio-params");
-  info << endl;
-  info << "Channels (output): ";
+  info << " -> ";
   appendAudioFormat(info, "audio-out-params");
   info << endl;
+  info << "Output driver: " << MPV_PROPERTY("current-ao") << endl;
   info << endl;
   info << "Performance: " << endl;
   info << "A/V: " << MPV_PROPERTY("avsync") << endl;
   info << "Dropped frames: " << MPV_PROPERTY("vo-drop-frame-count") << endl;
-  bool disp_sync = MPV_PROPERTY_BOOL("display-sync-active");
+  bool dispSync = MPV_PROPERTY_BOOL("display-sync-active");
   info << "Display Sync: ";
-  if (!disp_sync)
+  if (!dispSync)
   {
      info << "no" << endl;
   }
@@ -949,6 +1289,7 @@ QString PlayerComponent::videoInformation() const
   info << "Seconds: " << MPV_PROPERTY("demuxer-cache-duration") << endl;
   info << "Extra readahead: " << MPV_PROPERTY("cache-used") << endl;
   info << "Buffering: " << MPV_PROPERTY("cache-buffering-state") << endl;
+  info << "Speed: " << MPV_PROPERTY("cache-speed") << endl;
   info << endl;
   info << "Misc: " << endl;
   info << "Time: " << MPV_PROPERTY("playback-time") << " / "

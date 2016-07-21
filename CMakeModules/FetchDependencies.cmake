@@ -7,11 +7,42 @@ if(APPLE)
   set(ARCHSTR "darwin-x86_64")
 elseif(WIN32)
   set(OS "windows-i386")
-  set(ARCHSTR "windows-i386")
+  if (CMAKE_SIZEOF_VOID_P MATCHES 8)
+    set(ARCHSTR "windows-x86_64")
+  else()
+    set(ARCHSTR "windows-i386")
+  endif()
+elseif(OPENELEC)
+  if (OE_ARCH STREQUAL "x86_64")
+    set(ARCHSTR "linux-openelec-x86_64")
+  elseif(OE_ARCH STREQUAL "armv7")
+    set(ARCHSTR "linux-openelec-armv7")
+  endif()
 elseif(UNIX)
   set(ARCHSTR ${PLEX_BUILD_TARGET})
 endif(APPLE)
 
+option(ENABLE_CODECS "Enable CodecManifest downloading for Codecs on Demand" OFF)
+if(ENABLE_CODECS)
+  add_definitions(-DHAVE_CODEC_MANIFEST)
+
+  if(OPENELEC)
+    set(CODECS_BUILD_NUMBER 45)
+    message(STATUS "Downloading https://nightlies.plex.tv/codecs/${CODECS_BUILD_NUMBER}/CodecManifest-openelec-${OE_ARCH}.h")
+    file(
+      DOWNLOAD https://nightlies.plex.tv/codecs/${CODECS_BUILD_NUMBER}/CodecManifest-openelec-${OE_ARCH}.h  ${CMAKE_CURRENT_BINARY_DIR}/src/CodecManifest.h
+      STATUS DL_STATUS
+    )
+  else()
+    set(CODECS_BUILD_NUMBER 144)
+    message(STATUS "Downloading https://nightlies.plex.tv/codecs/${CODECS_BUILD_NUMBER}/CodecManifest-${ARCHSTR}.h")
+    file(
+      DOWNLOAD https://nightlies.plex.tv/codecs/${CODECS_BUILD_NUMBER}/CodecManifest-${ARCHSTR}.h  ${CMAKE_CURRENT_BINARY_DIR}/src/CodecManifest.h
+      STATUS DL_STATUS
+    )
+  endif()
+  message(STATUS "Result: ${DL_STATUS}")
+endif()
 
 function(get_content_of_url)
   set(ARGS URL CONTENT_VAR FILENAME)
@@ -50,7 +81,7 @@ function(get_content_of_url)
 endfunction(get_content_of_url)
 
 function(download_deps DD_NAME)
-  set(ARGS DIRECTORY BUILD_NUMBER ARTIFACTNAME VARIANT DEPHASH ARCHSTR DYLIB_SCRIPT_PATH)
+  set(ARGS DIRECTORY BUILD_NUMBER ARTIFACTNAME VARIANT DEPHASH_VAR ARCHSTR DYLIB_SCRIPT_PATH TOKEN)
   cmake_parse_arguments(DD "" "${ARGS}" "" ${ARGN})
 
   if(NOT DEFINED DD_VARIANT)
@@ -73,7 +104,11 @@ function(download_deps DD_NAME)
     set(DD_ALWAYS_DOWNLOAD ALWAYS)
   endif()
 
-  set(BASE_URL "https://nightlies.plex.tv/directdl/plex-dependencies/${DD_NAME}/${DD_BUILD_NUMBER}")
+  if(NOT DEFINED DD_TOKEN)
+    set(DD_TOKEN plex-dependencies)
+  endif()
+
+  set(BASE_URL "https://nightlies.plex.tv/directdl/${DD_TOKEN}/${DD_NAME}/${DD_BUILD_NUMBER}")
   set(DEP_DIR ${DEPENDENCY_UNTAR_DIR}/${DD_ARCHSTR}-${DD_NAME}/${DD_BUILD_NUMBER})
 
   set(HASH_FILENAME ${DD_NAME}-${DD_BUILD_NUMBER}-hash.txt)
@@ -84,6 +119,9 @@ function(download_deps DD_NAME)
   endif()
 
   message(STATUS "Dependency hash is: ${DEP_HASH}")
+  if(DD_DEPHASH_VAR)
+    set(${DD_DEPHASH_VAR} ${DEP_HASH} PARENT_SCOPE)
+  endif()
 
   set(DEP_DIRNAME "${DD_ARTIFACTNAME}-${DD_ARCHSTR}-${DD_VARIANT}-${DEP_HASH}")
   set(DEP_FILENAME ${DEP_DIRNAME}.tbz2)

@@ -16,6 +16,8 @@ namespace Paths
   QString cacheDir(const QString& file = QString());
   QString logDir(const QString& file = QString());
   QString socketName(const QString& serverName);
+  QString soundsPath(const QString& sound);
+  QString webClientPath();
 };
 
 #endif //KONVERGO_PATHS_H
